@@ -1,0 +1,27 @@
+name: Import verified Myron source history
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/import-myron-source.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  import:
+    if: github.repository == 'yuwenhua653/android_kernel_xiaomi_sm8850-modules'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Import exact source branch with history
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init --bare source.git
+          cd source.git
+          git fetch --no-tags https://github.com/yuwenhua653/oppo_oplus_realme_sm8850.git refs/heads/myron/native-modules
+          test "$(git rev-parse FETCH_HEAD)" = '2b4ac3715ae0c153617ea929642ae6550bcd1502'
+          test "$(git rev-parse 'FETCH_HEAD^{tree}')" = '67a6a2d1c5bf11c025193077baa02fe1457ba845'
+          git fsck --connectivity-only
+          git -c credential.helper='!f() { printf "%s\n" "username=x-access-token" "password=$GH_TOKEN"; }; f' push https://github.com/yuwenhua653/android_kernel_xiaomi_sm8850-modules.git FETCH_HEAD:refs/heads/lineage-24.0 FETCH_HEAD:refs/heads/myron/native-modules
+          printf 'Imported commit: %s\nVerified tree: %s\n' '2b4ac3715ae0c153617ea929642ae6550bcd1502' '67a6a2d1c5bf11c025193077baa02fe1457ba845' >> "$GITHUB_STEP_SUMMARY"
