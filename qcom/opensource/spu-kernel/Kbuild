@@ -1,3 +1,6 @@
+ifeq ($(CONFIG_ARCH_CANOE),y)
+include $(src)/Kbuild.canoe
+else
 # SPDX-License-Identifier: GPL-2.0-only
 
 
@@ -14,3 +17,5 @@ obj-$(CONFIG_MSM_SPSS_UTILS) += drivers/spss_utils.o
 
 BOARD_VENDOR_KERNEL_MODULES += $(KERNEL_MODULES_OUT)/spcom.ko
 BOARD_VENDOR_KERNEL_MODULES += $(KERNEL_MODULES_OUT)/spss_utils.ko
+
+endif

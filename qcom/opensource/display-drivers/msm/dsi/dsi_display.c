@@ -3569,12 +3569,12 @@ error:
 static ssize_t dsi_host_transfer(struct mipi_dsi_host *host, const struct mipi_dsi_msg *msg)
 {
 	int rc = 0;
-	struct dsi_cmd_desc cmd;
+	struct dsi_cmd_desc cmd = {0};
 	struct dsi_display *display;
 
-	if (!msg) {
+	if (!host || !msg) {
 		DSI_ERR("Invalid params\n");
-		return 0;
+		return -EINVAL;
 	}
 
 	display = to_dsi_display(host);
@@ -3583,6 +3583,8 @@ static ssize_t dsi_host_transfer(struct mipi_dsi_host *host, const struct mipi_d
 	cmd.ctrl = 0;
 	cmd.post_wait_ms = 0;
 	cmd.ctrl_flags = 0;
+	/* HFI consumes this field; standalone DCS writes must terminate a batch. */
+	cmd.last_command = !(msg->flags & MIPI_DSI_MSG_BATCH_COMMAND);
 
 	if (display->ctrl[0].ctrl->disp_op == MSM_DISP_OP_HFI)
 		rc = dsi_hfi_host_transfer_sub(host, &cmd);

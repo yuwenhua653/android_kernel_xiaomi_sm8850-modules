@@ -458,6 +458,7 @@ skip_incremental_update:
 		SDE_EVT32(brightness, bl_lvl);
 	}
 	mutex_unlock(&c_conn->bl_vrr.bl_lock);
+	atomic_set(&c_conn->bl_vrr.new_incremental_bl_update, 0);
 	return rc;
 }
 
@@ -502,6 +503,7 @@ static int sde_backlight_device_update_status(struct backlight_device *bd)
 
 	if (!c_conn->allow_bl_update) {
 		c_conn->unset_bl_level = bl_lvl;
+		c_conn->unset_bl_level_valid = true;
 		return 0;
 	}
 	SDE_EVT32(bl_lvl, brightness);
@@ -516,9 +518,11 @@ static int sde_backlight_device_update_status(struct backlight_device *bd)
 	if (c_conn->ops.set_backlight) {
 		/* skip notifying user space if bl is 0 */
 		if (c_conn->num_bl_frames && c_conn->frame_interval) {
-			sde_connector_begin_incremental_bl(c_conn, brightness, bl_lvl);
+			rc = sde_connector_begin_incremental_bl(c_conn, brightness, bl_lvl);
 		} else {
-			sde_backlight_set_notify(c_conn, brightness, bl_lvl);
+			rc = sde_backlight_set_notify(c_conn, brightness, bl_lvl);
+			if (rc)
+				goto done;
 			mutex_lock(&c_conn->bl_vrr.bl_lock);
 			c_conn->bl_vrr.curr_brightness = brightness;
 			c_conn->bl_vrr.curr_bl_lvl = bl_lvl;
@@ -526,10 +530,18 @@ static int sde_backlight_device_update_status(struct backlight_device *bd)
 			c_conn->bl_vrr.prev_bl_lvl = bl_lvl;
 			mutex_unlock(&c_conn->bl_vrr.bl_lock);
 		}
-		c_conn->unset_bl_level = 0;
+		if (!rc) {
+			c_conn->unset_bl_level = 0;
+			c_conn->unset_bl_level_valid = false;
+		}
 	}
 
 done:
+	if (rc) {
+		/* Keep the newest request for a later display commit, even if zero. */
+		c_conn->unset_bl_level = bl_lvl;
+		c_conn->unset_bl_level_valid = true;
+	}
 	sde_vm_unlock(sde_kms);
 
 	return rc;
@@ -1087,12 +1099,18 @@ static int _sde_connector_update_dimming_bl_lut(struct sde_connector *c_conn,
 	bl_config = &dsi_display->panel->bl_config;
 	bl_config->dimming_bl_lut = msm_property_get_blob(&c_conn->property_info,
 			&c_state->property_state, &sz, CONNECTOR_PROP_DIMMING_BL_LUT);
+	if (!c_conn->allow_bl_update) {
+		c_conn->bl_scale_dirty = true;
+		return 0;
+	}
+
 	rc = c_conn->ops.set_backlight(&c_conn->base,
 			dsi_display, bl_config->bl_level);
-	if (!rc)
-		c_conn->unset_bl_level = 0;
+	if (rc)
+		c_conn->bl_scale_dirty = true;
+	/* Reapplying the LUT at the old level does not satisfy a pending request. */
 
-	return 0;
+	return rc;
 }
 
 static int _sde_connector_update_dimming_ctrl(struct sde_connector *c_conn,
@@ -1200,11 +1218,14 @@ static int _sde_connector_update_bl_scale(struct sde_connector *c_conn)
 			SV_BL_SCALE_CAP : c_conn->bl_scale_sv;
 
 	if (!c_conn->allow_bl_update) {
-		c_conn->unset_bl_level = bl_config->bl_level;
+		if (!c_conn->unset_bl_level_valid) {
+			c_conn->unset_bl_level = bl_config->bl_level;
+			c_conn->unset_bl_level_valid = true;
+		}
 		return 0;
 	}
 
-	if (c_conn->unset_bl_level)
+	if (c_conn->unset_bl_level_valid)
 		bl_config->bl_level = c_conn->unset_bl_level;
 
 	SDE_DEBUG("bl_scale = %u, bl_scale_sv = %u, bl_level = %u\n",
@@ -1213,9 +1234,11 @@ static int _sde_connector_update_bl_scale(struct sde_connector *c_conn)
 	rc = c_conn->ops.set_backlight(&c_conn->base,
 			dsi_display, bl_config->bl_level);
 
-	if (!rc)
+	if (!rc) {
 		sde_dimming_bl_notify(c_conn, bl_config);
-	c_conn->unset_bl_level = 0;
+		c_conn->unset_bl_level = 0;
+		c_conn->unset_bl_level_valid = false;
+	}
 
 	return rc;
 }
@@ -1498,9 +1521,9 @@ static int _sde_connector_update_dirty_properties(
 	 * Special handling for postproc properties and
 	 * for updating backlight if any unset backlight level is present
 	 */
-	if (c_conn->bl_scale_dirty || c_conn->unset_bl_level) {
-		_sde_connector_update_bl_scale(c_conn);
-		c_conn->bl_scale_dirty = false;
+	if (c_conn->bl_scale_dirty || c_conn->unset_bl_level_valid) {
+		if (!_sde_connector_update_bl_scale(c_conn))
+			c_conn->bl_scale_dirty = false;
 	}
 
 	return 0;

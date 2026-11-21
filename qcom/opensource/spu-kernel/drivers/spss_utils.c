@@ -265,13 +265,17 @@ static ssize_t calc_fw_cmac_show(struct device *dev,
 		struct device_attribute *attr,
 		char *buf)
 {
+	int ret;
+
 	if (!dev || !attr || !buf) {
 		pr_err("invalid param.\n");
 		return -EINVAL;
 	}
 
 	/* first make sure the calc cmac is updated */
-	spss_get_fw_calc_cmac();
+	ret = spss_get_fw_calc_cmac();
+	if (ret)
+		return ret;
 
 	memcpy(buf, calc_fw_cmac, sizeof(calc_fw_cmac));
 
@@ -662,8 +666,7 @@ static int spss_utils_create_chardev(struct device *dev)
 	unsigned int count = 1;
 	void *priv = (void *) spss_utils_dev;
 
-	spss_utils_dev->cdev =
-		kzalloc(sizeof(*spss_utils_dev->cdev), GFP_KERNEL);
+	spss_utils_dev->cdev = cdev_alloc();
 	if (!spss_utils_dev->cdev)
 		return -ENOMEM;
 
@@ -672,12 +675,12 @@ static int spss_utils_create_chardev(struct device *dev)
 				 DEVICE_NAME);
 	if (ret < 0) {
 		pr_err("alloc_chrdev_region failed %d\n", ret);
-		return ret;
+		goto exit_put_cdev;
 	}
 
 	spss_utils_dev->driver_class = class_create(DEVICE_NAME);
 	if (IS_ERR(spss_utils_dev->driver_class)) {
-		ret = -ENOMEM;
+		ret = PTR_ERR(spss_utils_dev->driver_class);
 		pr_err("class_create failed %d\n", ret);
 		goto exit_unreg_chrdev_region;
 	}
@@ -689,11 +692,11 @@ static int spss_utils_create_chardev(struct device *dev)
 
 	if (IS_ERR(spss_utils_dev->class_dev)) {
 		pr_err("class_device_create failed %d\n", ret);
-		ret = -ENOMEM;
+		ret = PTR_ERR(spss_utils_dev->class_dev);
 		goto exit_destroy_class;
 	}
 
-	cdev_init(spss_utils_dev->cdev, &spss_utils_fops);
+	spss_utils_dev->cdev->ops = &spss_utils_fops;
 	spss_utils_dev->cdev->owner = THIS_MODULE;
 
 	ret = cdev_add(spss_utils_dev->cdev,
@@ -713,11 +716,16 @@ exit_destroy_class:
 	class_destroy(spss_utils_dev->driver_class);
 exit_unreg_chrdev_region:
 	unregister_chrdev_region(spss_utils_dev->device_no, 1);
+exit_put_cdev:
+	kobject_put(&spss_utils_dev->cdev->kobj);
+	spss_utils_dev->cdev = NULL;
 	return ret;
 }
 
 static void spss_utils_destroy_chardev(void)
 {
+	cdev_del(spss_utils_dev->cdev);
+	spss_utils_dev->cdev = NULL;
 	device_destroy(spss_utils_dev->driver_class, spss_utils_dev->device_no);
 	class_destroy(spss_utils_dev->driver_class);
 	unregister_chrdev_region(spss_utils_dev->device_no, 1);
@@ -981,7 +989,7 @@ static int spss_get_fw_calc_cmac(void)
 	/* get pbl fw cmac from ddr */
 	for (i = 0; i < CMAC_SIZE_IN_DWORDS; i++) {
 		val = readl_relaxed(reg);
-		calc_fw_cmac[i] = val;
+		cmac[i] = val;
 		reg += sizeof(u32);
 	}
 
@@ -1166,7 +1174,7 @@ static int spss_probe(struct platform_device *pdev)
 	int i;
 	struct device_node *np = NULL;
 	struct device *dev = &pdev->dev;
-	struct property *prop = NULL;
+	u32 rproc_phandle;
 	struct rproc *rproc = NULL;
 
 	np = pdev->dev.of_node;
@@ -1197,60 +1205,75 @@ static int spss_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	prop = of_find_property(np, "qcom,rproc-handle", NULL);
-	if (!prop)
-		return -EINVAL;
-
-	rproc = rproc_get_by_phandle(be32_to_cpup(prop->value));
+	ret = of_property_read_u32(np, "qcom,rproc-handle", &rproc_phandle);
+	if (ret)
+		return ret;
+	rproc = rproc_get_by_phandle(rproc_phandle);
 	if (!rproc)
 		return -EPROBE_DEFER;
-
 	ret = qcom_spss_set_fw_name(rproc, firmware_name);
-	if (ret < 0) {
-		if (ret != -EINVAL)
-			pr_err("fail to set firmware name for remoteproc (%d)\n", ret);
-		return -EPROBE_DEFER;
-	}
 	rproc_put(rproc);
+	if (ret)
+		return ret;
+
+	/* Initialize state before publishing the character device or notifier. */
+	for (i = 0; i < SPSS_NUM_EVENTS; i++) {
+		init_completion(&spss_events[i]);
+		spss_events_signaled[i] = false;
+	}
+	mutex_init(&event_lock);
+	is_iar_active = false;
+	is_ssr_disabled = false;
 
 	spss_utils_dev = kzalloc(sizeof(*spss_utils_dev), GFP_KERNEL);
 	if (spss_utils_dev == NULL)
 		return -ENOMEM;
 
-	ret = spss_utils_create_chardev(dev);
-	if (ret < 0)
-		return ret;
-
 	ret = spss_create_sysfs(dev);
 	if (ret < 0)
-		return ret;
+		goto free_utils;
 
 	iar_nb = kzalloc(sizeof(*iar_nb), GFP_KERNEL);
-	if (!iar_nb)
-		return -ENOMEM;
+	if (!iar_nb) {
+		ret = -ENOMEM;
+		goto destroy_sysfs;
+	}
 
 	iar_nb->notifier_call = spss_utils_rproc_callback;
 
 	iar_notif_handle = qcom_register_ssr_notifier("spss", iar_nb);
 	if (IS_ERR_OR_NULL(iar_notif_handle)) {
-		pr_err("register fail for IAR notifier\n");
-		kfree(iar_nb);
+		ret = iar_notif_handle ? PTR_ERR(iar_notif_handle) : -ENODEV;
 		iar_notif_handle = NULL;
+		kfree(iar_nb);
 		iar_nb = NULL;
+		goto destroy_sysfs;
 	}
 
-	for (i = 0 ; i < SPSS_NUM_EVENTS; i++) {
-		init_completion(&spss_events[i]);
-		spss_events_signaled[i] = false;
-	}
-	mutex_init(&event_lock);
-
-	is_iar_active = false;
-	is_ssr_disabled = false;
+	/* Publish ioctls only after every fallible setup stage is ready. */
+	ret = spss_utils_create_chardev(dev);
+	if (ret)
+		goto unregister_notifier;
 
 	pr_info("Probe completed successfully, [%s].\n", firmware_name);
 
 	return 0;
+
+unregister_notifier:
+	qcom_unregister_ssr_notifier(iar_notif_handle, iar_nb);
+	iar_notif_handle = NULL;
+	kfree(iar_nb);
+	iar_nb = NULL;
+destroy_sysfs:
+	spss_destroy_sysfs(dev);
+	if (cmac_mem) {
+		iounmap(cmac_mem);
+		cmac_mem = NULL;
+	}
+free_utils:
+	kfree(spss_utils_dev);
+	spss_utils_dev = NULL;
+	return ret;
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0))
@@ -1262,8 +1285,9 @@ static int spss_remove(struct platform_device *pdev)
 	spss_utils_destroy_chardev();
 	spss_destroy_sysfs(spss_dev);
 
-	if (!iar_notif_handle && !iar_nb)
+	if (!IS_ERR_OR_NULL(iar_notif_handle) && iar_nb)
 		qcom_unregister_ssr_notifier(iar_notif_handle, iar_nb);
+	iar_notif_handle = NULL;
 
 	kfree(iar_nb);
 	iar_nb = 0;
@@ -1291,6 +1315,7 @@ static struct platform_driver spss_driver = {
 	.driver = {
 		.name = DEVICE_NAME,
 		.of_match_table = of_match_ptr(spss_match_table),
+		.suppress_bind_attrs = true,
 	},
 };
 
@@ -1318,3 +1343,4 @@ module_exit(spss_exit)
 MODULE_SOFTDEP("pre: qcom_spss");
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("Secure Processor Utilities");
+MODULE_INFO(myron_standby_revision, "20261115");

@@ -1320,5 +1320,10 @@ static void __exit msm_vidc_exit(void)
 module_init(msm_vidc_init);
 module_exit(msm_vidc_exit);
 
+#ifdef CONFIG_TARGET_PRODUCT_MYRON
+/* Native 6.12 uses qcom_scm/MDT directly; subsys-pil-tz is not a provider. */
+MODULE_SOFTDEP("pre: msm-mmrm");
+#else
 MODULE_SOFTDEP("pre: subsys-pil-tz msm-mmrm");
+#endif
 MODULE_LICENSE("GPL v2");

@@ -48,3 +48,7 @@ CFLAGS_core/rmnet_qmap.o += -DCONFIG_RMNET_LA_PLATFORM=1 -DRMNET_TRACE_INCLUDE_P
 CFLAGS_core/rmnet_ll.o += -DCONFIG_RMNET_LA_PLATFORM=1 -DRMNET_TRACE_INCLUDE_PATH=$(src)/core
 CFLAGS_core/rmnet_ll_ipa.o += -DCONFIG_RMNET_LA_PLATFORM=1 -DRMNET_TRACE_INCLUDE_PATH=$(src)/core
 CFLAGS_core/rmnet_ll_qmap.o += -DCONFIG_RMNET_LA_PLATFORM=1 -DRMNET_TRACE_INCLUDE_PATH=$(src)/core
+
+# IPA is built as the external ipam module. Expose its real APIs to RMNET
+# instead of the CONFIG_IPA3-disabled inline stubs in linux/ipa.h.
+ccflags-y += -DCONFIG_IPA3_MODULE=1

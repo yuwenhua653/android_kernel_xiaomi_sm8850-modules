@@ -34,3 +34,9 @@ smmu_proxy_dlkm-y := smmu-proxy/qti-smmu-proxy-common.o \
 	smmu-proxy/qti-smmu-proxy-pvm.o
 CFLAGS_smmu-proxy/qti-smmu-proxy-common.o += -DSMCINVOKE_TRACE_INCLUDE_PATH=$(src)/smcinvoke/compat -DCONFIG_QCOM_SI_CORE_TEST -DCONFIG_QCOM_SMCINVOKE -DCONFIG_QSEECOM_COMPAT -DCONFIG_QCOM_SI_CORE -DCONFIG_MSM_TMECOM_QMP -DCONFIG_TZLOG_TIME_CONSOLIDATE
 CFLAGS_smmu-proxy/qti-smmu-proxy-pvm.o += -DSMCINVOKE_TRACE_INCLUDE_PATH=$(src)/smcinvoke/compat -DCONFIG_QCOM_SI_CORE_TEST -DCONFIG_QCOM_SMCINVOKE -DCONFIG_QSEECOM_COMPAT -DCONFIG_QCOM_SI_CORE -DCONFIG_MSM_TMECOM_QMP -DCONFIG_TZLOG_TIME_CONSOLIDATE
+
+# Native qcedev requires the in-tree SPS DMA provider.
+obj-m += qce50_dlkm.o
+qce50_dlkm-y := crypto-qti/qce50.o
+obj-m += qcedev-mod_dlkm.o
+qcedev-mod_dlkm-y := crypto-qti/qcedev.o crypto-qti/qcedev_smmu.o crypto-qti/compat_qcedev.o

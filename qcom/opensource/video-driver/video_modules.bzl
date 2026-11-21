@@ -15,7 +15,6 @@ module_entry(
         "driver/vidc/src/msm_vidc_driver.c",
         "driver/vidc/src/msm_vidc_state.c",
         "driver/vidc/src/msm_vidc_control.c",
-        "driver/vidc/src/msm_vidc_control_ext.c",
         "driver/vidc/src/msm_vidc_buffer.c",
         "driver/vidc/src/msm_vidc_power.c",
         "driver/vidc/src/msm_vidc_probe.c",

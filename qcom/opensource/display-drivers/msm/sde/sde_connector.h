@@ -763,6 +763,7 @@ struct sde_backlight_vrr_update {
  * @bl_scale: BL scale value for ABA feature
  * @bl_scale_sv: BL scale value for sunlight visibility feature
  * @unset_bl_level: BL level that needs to be set later
+ * @unset_bl_level_valid: Pending BL request, including a zero/off level
  * @hdr_eotf: Electro optical transfer function obtained from HDR block
  * @hdr_metadata_type_one: Metadata type one obtained from HDR block
  * @hdr_max_luminance: desired max luminance obtained from HDR block
@@ -860,6 +861,7 @@ struct sde_connector {
 	u32 bl_scale;
 	u32 bl_scale_sv;
 	u32 unset_bl_level;
+	bool unset_bl_level_valid;
 	bool allow_bl_update;
 	bool dimming_bl_notify_enabled;
 	struct sde_backlight_vrr_update bl_vrr;

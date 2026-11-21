@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Native Android Canoe selection from video_modules.bzl/video_driver_build.bzl.
+# Build directly from source paths; no generated headers/symlinks in the source tree.
+# MMRM is built first as a separate external module. Import its exported symbols
+# from the output tree for modpost, including builds with a relative M= path.
+KBUILD_EXTRA_SYMBOLS += $(abspath $(obj)/../mmrm-driver/Module.symvers)
+ccflags-y += -I$(src)/driver/vidc/inc -I$(src)/driver/platform/common/inc -I$(src)/driver/variant/common/inc -I$(src)/include/uapi/vidc -I$(src)/include/uapi/vidc/media -I$(src)/driver/platform/canoe/inc -I$(src)/driver/platform/alor/inc -I$(src)/driver/platform/ravelin/inc -I$(src)/driver/platform/bourtzi/inc -I$(src)/driver/platform/chora/inc -I$(src)/driver/variant/iris4/inc -I$(src)/driver/variant/iris2/inc -I$(src)/driver/variant/ar50lt/inc
+ccflags-y += -DCONFIG_MSM_MMRM=1 -DCONFIG_MSM_VIDC_LLCC=1 -DCONFIG_MSM_VIDC_ANDROID=1 -DCONFIG_MSM_VIDC_MINIDUMP=1 -DCONFIG_MSM_VIDC_RAVELIN=1 -DCONFIG_MSM_VIDC_BOURTZI=1 -DCONFIG_MSM_VIDC_CANOE=1 -DCONFIG_MSM_VIDC_CHORA=1
+obj-m += msm_video.o
+msm_video-y := driver/vidc/src/msm_vidc_v4l2.o \
+	driver/vidc/src/msm_vidc_vb2.o \
+	driver/vidc/src/msm_vidc.o \
+	driver/vidc/src/msm_vdec.o \
+	driver/vidc/src/msm_venc.o \
+	driver/vidc/src/msm_vidc_driver.o \
+	driver/vidc/src/msm_vidc_state.o \
+	driver/vidc/src/msm_vidc_control.o \
+	driver/vidc/src/msm_vidc_buffer.o \
+	driver/vidc/src/msm_vidc_power.o \
+	driver/vidc/src/msm_vidc_probe.o \
+	driver/vidc/src/resources.o \
+	driver/vidc/src/resources_ext.o \
+	driver/vidc/src/firmware.o \
+	driver/vidc/src/msm_vidc_debug.o \
+	driver/vidc/src/msm_vidc_memory.o \
+	driver/vidc/src/msm_vidc_memory_ext.o \
+	driver/vidc/src/msm_vidc_fence.o \
+	driver/vidc/src/venus_hfi.o \
+	driver/vidc/src/venus_hfi_queue.o \
+	driver/vidc/src/hfi_packet.o \
+	driver/vidc/src/venus_hfi_response.o \
+	driver/platform/common/src/msm_vidc_platform.o \
+	driver/platform/common/src/msm_vidc_platform_ext.o \
+	driver/variant/common/src/msm_vidc_variant.o \
+	driver/vidc/src/msm_vidc_md.o \
+	driver/variant/ar50lt/src/msm_vidc_buffer_ar50lt.o \
+	driver/variant/ar50lt/src/msm_vidc_power_ar50lt.o \
+	driver/variant/ar50lt/src/msm_vidc_ar50lt.o \
+	driver/platform/ravelin/src/msm_vidc_ravelin.o \
+	driver/platform/bourtzi/src/msm_vidc_bourtzi.o \
+	driver/variant/iris4/src/msm_vidc_buffer_iris4.o \
+	driver/variant/iris4/src/msm_vidc_bus_iris4.o \
+	driver/variant/iris4/src/msm_vidc_clock_iris4.o \
+	driver/variant/iris4/src/msm_vidc_power_iris4.o \
+	driver/variant/iris4/src/msm_vidc_iris4.o \
+	driver/platform/canoe/src/msm_vidc_canoe.o \
+	driver/platform/alor/src/msm_vidc_alor.o \
+	driver/variant/iris2/src/msm_vidc_buffer_iris2.o \
+	driver/variant/iris2/src/msm_vidc_power_iris2.o \
+	driver/variant/iris2/src/msm_vidc_iris2.o \
+	driver/platform/chora/src/msm_vidc_chora.o

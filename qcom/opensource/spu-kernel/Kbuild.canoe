@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-2.0-only
+ccflags-y += -I$(src)/include/uapi
+obj-m += spcom.o
+spcom-y := drivers/spcom.o
+obj-m += spss_utils.o
+spss_utils-y := drivers/spss_utils.o
