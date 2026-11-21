@@ -13,6 +13,8 @@ uses the synaptics,ddic-id-gpios descriptor supplied by the paired board
 DTS and reads the selected child node's firmware, THP and test filenames.
 Use the corresponding factory files in the OS4 vendor/odm environment.
 
-The full display layer must also populate the controller's panel phandles
-for screen-state notifications. Runtime, secure touch, firmware loading
-and userspace compatibility require device testing.
+The paired Canoe board display overlay supplies the factory-ordered panel
+list. The notifier searches all candidates for the registered DRM panel.
+If DRM defers the lookup it retries on a deferrable timer, including after
+a rebind. Removal unregisters the notifier before draining queued events.
+Panel events, secure touch and firmware loading still need device testing.
