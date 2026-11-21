@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# MiCode Canoe feature profile for the Xiaomi touch framework.
+ccflags-y += -DTOUCH_THP_SUPPORT -DTOUCH_FOD_SUPPORT -DTOUCH_MULTI_PANEL_NOTIFIER_SUPPORT
+obj-m += xiaomi_touch.o
+xiaomi_touch-y := xiaomi_touch_core.o xiaomi_touch_knock_data.o \
+	xiaomi_touch_proc.o xiaomi_touch_operations.o xiaomi_touch_sys.o \
+	xiaomi_touch_mode.o xiaomi_touch_evdev.o xiaomi_touch_device.o
+
+obj-m += synaptics_tcm2.o
+ccflags-y += -I$(src)/syna -I$(src)/syna/tcm -DCONFIG_TRUSTED_TOUCH
+ccflags-y += -DCONFIG_TOUCHSCREEN_SYNA_TCM2_REFLASH -DCONFIG_TOUCHSCREEN_SYNA_TCM2_SYSFS
+ccflags-y += -DCONFIG_TOUCHSCREEN_SYNA_TCM2_TESTING
+synaptics_tcm2-y := syna/syna_tcm2.o syna/syna_tcm2_cdev.o \
+	syna/syna_tcm2_platform_spi.o syna/syna_tcm2_sysfs.o \
+	syna/syna_tcm2_testing.o syna/syna_xiaomi_driver.o syna/qts/qts_core.o \
+	syna/tcm/synaptics_touchcom_core_v1.o syna/tcm/synaptics_touchcom_core_v2.o \
+	syna/tcm/synaptics_touchcom_func_base.o syna/tcm/synaptics_touchcom_func_touch.o \
+	syna/tcm/synaptics_touchcom_func_reflash.o syna/tcm/synaptics_touchcom_func_romboot.o
