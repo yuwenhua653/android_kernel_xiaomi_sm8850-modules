@@ -1394,13 +1394,13 @@ static int __wlan_hdd_bus_suspend(struct wow_enable_params wow_params,
 
 	pending = cdp_rx_get_pending(cds_get_context(QDF_MODULE_ID_SOC));
 	if (pending) {
-		hdd_debug("Prevent suspend, RX frame pending %d", pending);
+		hdd_info("Prevent system suspend, RX frame pending %d", pending);
 		err = -EBUSY;
 		goto resume_txrx;
 	}
 
 	if (hif_try_prevent_ep_vote_access(hif_ctx)) {
-		hdd_debug("Prevent suspend, ep work pending");
+		hdd_info("Prevent system suspend, ep work pending");
 		err = -EBUSY;
 		goto resume_txrx;
 	}
