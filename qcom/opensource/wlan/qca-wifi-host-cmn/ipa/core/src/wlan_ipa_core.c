@@ -6520,6 +6520,8 @@ QDF_STATUS wlan_ipa_uc_ol_init(struct wlan_ipa_priv *ipa_ctx,
 			       qdf_device_t osdev)
 {
 	uint8_t i;
+	uint8_t initialized_work = 0;
+	uint8_t prepared_work = 0;
 	QDF_STATUS status = QDF_STATUS_SUCCESS;
 
 	if (!wlan_ipa_uc_is_enabled(ipa_ctx->config))
@@ -6548,7 +6550,10 @@ QDF_STATUS wlan_ipa_uc_ol_init(struct wlan_ipa_priv *ipa_ctx,
 	for (i = 0; i < WLAN_IPA_UC_OPCODE_MAX; i++) {
 		ipa_ctx->uc_op_work[i].osdev = osdev;
 		ipa_ctx->uc_op_work[i].msg = NULL;
+		ipa_ctx->uc_op_work[i].msg_list = NULL;
+		ipa_ctx->uc_op_work[i].flag = 0;
 		ipa_ctx->uc_op_work[i].ipa_priv_bp = ipa_ctx;
+		prepared_work++;
 		if (i == WLAN_IPA_CTRL_TX_REINJECT ||
 		    i == WLAN_IPA_CTRL_FILTER_DEL_NOTIFY) {
 			ipa_ctx->uc_op_work[i].msg_list = qdf_mem_malloc(
@@ -6557,23 +6562,32 @@ QDF_STATUS wlan_ipa_uc_ol_init(struct wlan_ipa_priv *ipa_ctx,
 						WLAN_IPA_FLAG_MSG_USES_LIST;
 			if (!ipa_ctx->uc_op_work[i].msg_list) {
 				ipa_err("msg list struct memory allocation failed");
+				status = QDF_STATUS_E_NOMEM;
+				goto free_res;
 			} else {
+				qdf_spinlock_create(&ipa_ctx->uc_op_work[i].
+						    msg_list->lock);
 				ipa_ctx->uc_op_work[i].msg_list->entries =
 				   qdf_mem_malloc(
 					WLAN_IPA_MSG_LIST_SIZE_MAX * sizeof(
 						struct msg_elem));
 				ipa_ctx->uc_op_work[i].msg_list->list_size =
 						WLAN_IPA_MSG_LIST_SIZE_MAX;
-				if (!ipa_ctx->uc_op_work[i].msg_list->entries)
+				if (!ipa_ctx->uc_op_work[i].msg_list->entries) {
 					ipa_err("msg list memory allocation failed");
-				qdf_spinlock_create(&ipa_ctx->uc_op_work[i].
-						    msg_list->lock);
+					status = QDF_STATUS_E_NOMEM;
+					goto free_res;
+				}
 			}
 		}
+	}
 
+	/* All queues must exist before a UC-ready callback can schedule work. */
+	for (i = 0; i < WLAN_IPA_UC_OPCODE_MAX; i++) {
 		qdf_create_work(0, &ipa_ctx->uc_op_work[i].work,
 				wlan_ipa_uc_fw_op_event_handler,
 				&ipa_ctx->uc_op_work[i]);
+		initialized_work++;
 	}
 
 	if (ipa_ctx->uc_loaded && !ipa_ctx->uc_load_handled) {
@@ -6603,6 +6617,14 @@ QDF_STATUS wlan_ipa_uc_ol_init(struct wlan_ipa_priv *ipa_ctx,
 		if (status) {
 			ipa_log_err("Failure to map Tx buffers for IPA(status=%d)",
 				    status);
+			/* Match the asynchronous UC-ready path's unwind. */
+			cdp_ipa_cleanup(ipa_ctx->dp_soc, IPA_DEF_PDEV_ID,
+					ipa_ctx->tx_pipe_handle,
+					ipa_ctx->rx_pipe_handle, ipa_ctx->hdl);
+			if (wlan_ipa_uc_sta_is_enabled(ipa_ctx->config)) {
+				qdf_cancel_work(&ipa_ctx->mcc_work);
+				wlan_ipa_teardown_sys_pipe(ipa_ctx);
+			}
 			goto free_res;
 		}
 		ipa_log_info("TX buffers mapped to IPA");
@@ -6623,8 +6645,11 @@ QDF_STATUS wlan_ipa_uc_ol_init(struct wlan_ipa_priv *ipa_ctx,
 
 free_res:
 	ipa_log_debug("failure case: free allocated resources");
-	for (i = 0; i < WLAN_IPA_UC_OPCODE_MAX; i++) {
-		qdf_cancel_work(&ipa_ctx->uc_op_work[i].work);
+	for (i = 0; i < prepared_work; i++) {
+		if (i < initialized_work)
+			qdf_cancel_work(&ipa_ctx->uc_op_work[i].work);
+		qdf_mem_free(ipa_ctx->uc_op_work[i].msg);
+		ipa_ctx->uc_op_work[i].msg = NULL;
 		if (i == WLAN_IPA_CTRL_TX_REINJECT ||
 		    i == WLAN_IPA_CTRL_FILTER_DEL_NOTIFY) {
 			if (!ipa_ctx->uc_op_work[i].msg_list) {
@@ -6636,6 +6661,7 @@ free_res:
 				qdf_spinlock_destroy(&ipa_ctx->uc_op_work[i].
 					     msg_list->lock);
 				qdf_mem_free(ipa_ctx->uc_op_work[i].msg_list);
+				ipa_ctx->uc_op_work[i].msg_list = NULL;
 			}
 		}
 	}
@@ -6680,12 +6706,17 @@ QDF_STATUS wlan_ipa_uc_ol_deinit(struct wlan_ipa_priv *ipa_ctx)
 		ipa_ctx->uc_op_work[i].msg = NULL;
 		if (i == WLAN_IPA_CTRL_TX_REINJECT ||
 		    i == WLAN_IPA_CTRL_FILTER_DEL_NOTIFY) {
-			qdf_mem_free(ipa_ctx->uc_op_work[i].msg_list->entries);
-			qdf_spinlock_destroy(&ipa_ctx->uc_op_work[i].
-					     msg_list->lock);
-			qdf_mem_free(ipa_ctx->uc_op_work[i].msg_list);
+			if (ipa_ctx->uc_op_work[i].msg_list) {
+				qdf_mem_free(ipa_ctx->uc_op_work[i].msg_list->entries);
+				qdf_spinlock_destroy(&ipa_ctx->uc_op_work[i].
+						     msg_list->lock);
+				qdf_mem_free(ipa_ctx->uc_op_work[i].msg_list);
+				ipa_ctx->uc_op_work[i].msg_list = NULL;
+			}
 		}
 	}
+	/* UC-ready work is drained; no new vote should use the closing pipes. */
+	ipa_ctx->uc_load_handled = false;
 	cdp_ipa_iounmap_doorbell_vaddr(ipa_ctx->dp_soc, IPA_DEF_PDEV_ID);
 
 	if (true == ipa_ctx->uc_loaded) {
