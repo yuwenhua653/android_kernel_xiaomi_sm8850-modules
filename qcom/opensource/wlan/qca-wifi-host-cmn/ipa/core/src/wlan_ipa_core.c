@@ -6448,7 +6448,11 @@ static void __wlan_ipa_uc_fw_op_event_handler(void *data)
 			msg = qdf_mem_malloc(sizeof(*msg));
 			if (!msg) {
 				ipa_err("Message memory allocation failed");
-				return;
+				/* Dequeue transferred ownership of this packet. */
+				qdf_nbuf_free(notify_msg->nbuf);
+				notify_msg =
+					wlan_fw_event_msg_list_dequeue(uc_op_work);
+				continue;
 			}
 
 			msg->op_code = notify_msg->op_code;
@@ -6687,6 +6691,7 @@ static void wlan_ipa_cleanup_pending_event(struct wlan_ipa_priv *ipa_ctx)
 
 QDF_STATUS wlan_ipa_uc_ol_deinit(struct wlan_ipa_priv *ipa_ctx)
 {
+	struct msg_elem *pending;
 	QDF_STATUS status = QDF_STATUS_SUCCESS;
 	int i;
 
@@ -6707,6 +6712,12 @@ QDF_STATUS wlan_ipa_uc_ol_deinit(struct wlan_ipa_priv *ipa_ctx)
 		if (i == WLAN_IPA_CTRL_TX_REINJECT ||
 		    i == WLAN_IPA_CTRL_FILTER_DEL_NOTIFY) {
 			if (ipa_ctx->uc_op_work[i].msg_list) {
+				/* Cancelled work may still own queued packets. */
+				if (i == WLAN_IPA_CTRL_TX_REINJECT) {
+					while ((pending = wlan_fw_event_msg_list_dequeue(
+							&ipa_ctx->uc_op_work[i])))
+						qdf_nbuf_free(pending->nbuf);
+				}
 				qdf_mem_free(ipa_ctx->uc_op_work[i].msg_list->entries);
 				qdf_spinlock_destroy(&ipa_ctx->uc_op_work[i].
 						     msg_list->lock);

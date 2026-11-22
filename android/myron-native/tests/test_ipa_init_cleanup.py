@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fault-inject the production IPA uC initializer and check resource unwinding."""
+"""Fault-inject production IPA initialization, queue work and teardown ownership."""
 import argparse
 from pathlib import Path
 import re
@@ -18,6 +18,10 @@ def main():
     body = source[start:source.index('\n/**', start)]
     start = source.index('QDF_STATUS wlan_ipa_uc_ol_deinit(')
     body += source[start:source.index('\n/**', start)]
+    start = source.index('static struct msg_elem *\nwlan_fw_event_msg_list_dequeue(')
+    queue = source[start:source.index('\n/**', start)]
+    start = source.index('static void __wlan_ipa_uc_fw_op_event_handler(')
+    queue += source[start:source.index('\n/**', start)]
     header = (base/'inc/wlan_ipa_priv.h').read_text()
     enum = re.search(r'enum wlan_ipa_uc_op_code \{.*?\};', header, re.S)[0]
     pre = r'''
@@ -37,6 +41,7 @@ typedef void *qdf_device_t;
 #define WLAN_IPA_MAX_IFACE 4
 #define WLAN_IPA_MSG_LIST_SIZE_MAX 16
 #define WLAN_IPA_FLAG_MSG_USES_LIST 1
+#define WLAN_IPA_FLAG_MSG_USES_LIST_FLT_DEL 2
 #define WLAN_IPA_STATE_PIPE_CONNECTION_DONE 3
 #define WLAN_IPA_STATE_DEINIT 0
 #define IPA_DEF_PDEV_ID 0
@@ -47,28 +52,39 @@ typedef void *qdf_device_t;
 #define ipa_log_info(...) ((void)0)
 '''
     mocks = r'''
-struct msg_elem {int value;};
-struct op_msg_list {int lock,list_size;struct msg_elem *entries;};
+struct packet {int live;};
+struct msg_elem {int op_code,vdev_id,hdl,result;struct packet *nbuf;};
+struct op_msg_type {int op_code,vdev_id,ctrl_del_hdl,rsvd_snd;struct packet *nbuf;};
+struct op_msg_list {int lock,list_size;uint16_t hp,tp;struct msg_elem *entries;};
 struct work {int ready;};
 struct uc_op_work_struct {
  void *osdev,*msg,*ipa_priv_bp;struct op_msg_list *msg_list;int flag;struct work work;
 };
 struct wlan_ipa_priv {
  int config,dp_soc,ipa_init_state,tx_pipe_handle,rx_pipe_handle,hdl;
- int deinit_in_prog,ipa_lock;
+ int deinit_in_prog,ipa_lock,ipa_ctrl_flt_rm_shutdown_evt;
  bool uc_loaded,uc_load_handled;
  uint8_t vdev_to_iface[WLAN_IPA_MAX_SESSION];
  bool vdev_offload_enabled[WLAN_IPA_MAX_SESSION],disable_intrabss_fwd[WLAN_IPA_MAX_SESSION];
  struct uc_op_work_struct uc_op_work[WLAN_IPA_UC_OPCODE_MAX];struct work mcc_work;
 };
 static int allocations,alloc_call,fail_alloc,locks,registered,setup_error,map_error;
-static int created_work;
+static int created_work,fail_all,dispatched;
 static int connected,disconnects,sys_teardown,resource_error,cases;
 static void *qdf_mem_malloc(size_t n) {
- if(++alloc_call==fail_alloc)return NULL;
+ if(++alloc_call==fail_alloc || fail_all)return NULL;
  void *p=calloc(1,n);assert(p);allocations++;return p;
 }
 static void qdf_mem_free(void *p) {if(p){assert(allocations>0);allocations--;free(p);}}
+static void qdf_nbuf_free(struct packet *p){assert(p && p->live==1);p->live=0;}
+static void qdf_spin_lock_bh(int *p){assert(*p==1);*p=2;}
+static void qdf_spin_unlock_bh(int *p){assert(*p==2);*p=1;}
+static void qdf_event_set(int *p){*p=1;}
+static void wlan_ipa_uc_op_cb(struct op_msg_type *msg,struct wlan_ipa_priv *ctx){
+ assert(ctx);dispatched++;
+ if(msg->op_code==WLAN_IPA_CTRL_TX_REINJECT)qdf_nbuf_free(msg->nbuf);
+ qdf_mem_free(msg);
+}
 static void qdf_spinlock_create(int *p){assert(!*p);*p=1;locks++;}
 static void qdf_spinlock_destroy(int *p){assert(*p==1);*p=0;locks--;}
 static void qdf_create_work(int id,struct work *w,void (*cb)(void *),void *arg){
@@ -154,12 +170,53 @@ int main(void){
  assert(wlan_ipa_uc_ol_init(&ctx,&ctx)==QDF_STATUS_E_FAILURE && !alloc_call);cases++;
  ctx.config=0;
  assert(wlan_ipa_uc_ol_init(&ctx,&ctx)==0 && !alloc_call);cases++;
- printf("PASS: %d IPA lifecycle cases; allocation failures/retry; work/lock cleanup; SMMU unwind; teardown readiness\n",cases);
+ /* Exercise every ring head/tail position, including wrap and full queues.
+  * A successful callback takes packet ownership; an OOM path must free it.
+  */
+ resource_error=0;
+ for(int start=0;start<16;start++)for(int count=0;count<16;count++){
+  for(int failure=0;failure<=count+1;failure++){
+   struct packet packets[16]={0};
+   memset(&ctx,0,sizeof(ctx));ctx.config=1;fail_alloc=0;fail_all=0;
+   assert(wlan_ipa_uc_ol_init(&ctx,&ctx)==0);
+   struct uc_op_work_struct *w=&ctx.uc_op_work[WLAN_IPA_CTRL_TX_REINJECT];
+   struct op_msg_list *l=w->msg_list;l->tp=start;l->hp=(start+count)&15;
+   for(int j=0;j<count;j++){
+    packets[j].live=1;
+    l->entries[(start+j)&15]=(struct msg_elem){
+     .op_code=WLAN_IPA_CTRL_TX_REINJECT,.vdev_id=j,.nbuf=&packets[j]};
+   }
+   dispatched=0;fail_alloc=alloc_call+failure;fail_all=(failure==count+1);
+   __wlan_ipa_uc_fw_op_event_handler(w);
+   assert(l->tp==l->hp);
+   assert(dispatched==(fail_all?0:count-(failure>0 && failure<=count)));
+   for(int j=0;j<count;j++)assert(!packets[j].live);
+   fail_all=0;fail_alloc=0;release_success(&ctx);cases++;
+  }
+  /* Simulate cancelled work: packets remain owned by the queue at deinit. */
+  struct packet packets[16]={0};
+  memset(&ctx,0,sizeof(ctx));ctx.config=1;
+  assert(wlan_ipa_uc_ol_init(&ctx,&ctx)==0);
+  struct op_msg_list *l=ctx.uc_op_work[WLAN_IPA_CTRL_TX_REINJECT].msg_list;
+  l->tp=start;l->hp=(start+count)&15;
+  for(int j=0;j<count;j++){
+   packets[j].live=1;l->entries[(start+j)&15].nbuf=&packets[j];
+  }
+  /* Filter notifications carry handles, not packet ownership. */
+  struct packet sentinel={.live=1};
+  l=ctx.uc_op_work[WLAN_IPA_CTRL_FILTER_DEL_NOTIFY].msg_list;
+  l->tp=start;l->hp=(start+count)&15;
+  for(int j=0;j<count;j++)l->entries[(start+j)&15].nbuf=&sentinel;
+  release_success(&ctx);
+  for(int j=0;j<count;j++)assert(!packets[j].live);
+  assert(sentinel.live==1);cases++;
+ }
+ printf("PASS: %d IPA lifecycle/queue cases; packet ownership/OOM/wrap/cancel; allocation failures/retry; work/lock cleanup; SMMU unwind; teardown readiness\n",cases);
 }
 '''
     with tempfile.TemporaryDirectory() as tmp:
         c,exe=Path(tmp)/'test.c',Path(tmp)/'test'
-        c.write_text(pre+enum+mocks+body+tests)
+        c.write_text(pre+enum+mocks+queue+body+tests)
         subprocess.run(['cc','-std=gnu11','-Wall','-Wextra','-Werror',
                         '-fsanitize=undefined',str(c),'-o',str(exe)],check=True)
         subprocess.run([str(exe)],check=True)
