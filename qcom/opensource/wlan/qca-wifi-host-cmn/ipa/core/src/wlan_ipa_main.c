@@ -194,6 +194,14 @@ QDF_STATUS ipa_rm_set_perf_level(struct wlan_objmgr_pdev *pdev,
 		return QDF_STATUS_E_FAILURE;
 	}
 
+	/* IPA ready precedes uC pipe setup and its PM-client registration.
+	 * Periodic bandwidth samples must wait for that setup. The setup path
+	 * installs the initial vote; the next sample then updates it normally.
+	 */
+	if (wlan_ipa_uc_is_enabled(ipa_obj->config) &&
+	    !ipa_obj->uc_load_handled)
+		return QDF_STATUS_SUCCESS;
+
 	return wlan_ipa_set_perf_level(ipa_obj, tx_packets, rx_packets);
 }
 

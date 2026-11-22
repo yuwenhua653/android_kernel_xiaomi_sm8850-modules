@@ -1313,7 +1313,8 @@ int ipa_pm_set_throughput(u32 hdl, int throughput)
 	mutex_lock(&ipa_pm_ctx->client_mutex);
 	if (hdl >= IPA_PM_MAX_CLIENTS || ipa_pm_ctx->clients[hdl] == NULL
 		|| throughput < 0) {
-		IPA_PM_ERR("Invalid Params\n");
+		IPA_PM_ERR("Invalid throughput request: hdl=%u mbps=%d\n",
+			hdl, throughput);
 		mutex_unlock(&ipa_pm_ctx->client_mutex);
 		return -EINVAL;
 	}

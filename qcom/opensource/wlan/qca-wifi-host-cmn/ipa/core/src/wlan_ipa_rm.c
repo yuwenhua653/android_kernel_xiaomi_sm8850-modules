@@ -165,7 +165,7 @@ void wlan_ipa_set_perf_level_bw(struct wlan_ipa_priv *ipa_ctx,
 
 	ipa_ctx->curr_bw_level = lvl;
 
-	if (!ipa_ctx->uc_loaded) {
+	if (!ipa_ctx->uc_load_handled) {
 		ipa_info_rl("current bw level %u", ipa_ctx->curr_bw_level);
 		return;
 	}
