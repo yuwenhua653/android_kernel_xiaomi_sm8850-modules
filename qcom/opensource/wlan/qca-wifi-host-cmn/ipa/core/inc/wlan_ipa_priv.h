@@ -962,6 +962,13 @@ struct wlan_ipa_priv {
 	qdf_ipa_wdi_in_params_t prod_pipe_in;
 	bool uc_loaded;
 	bool uc_load_handled;
+	/* Protects event publication/slots; readiness can precede pipe init. */
+	qdf_spinlock_t uc_ready_lock;
+	qdf_work_t uc_ready_work;
+	bool uc_ready_seen;
+	bool uc_ready_work_enabled;
+	bool uc_op_work_enabled;
+	bool wdi_initialized;
 	bool wdi_enabled;
 	bool over_gsi;
 	qdf_mc_timer_t rt_debug_fill_timer;

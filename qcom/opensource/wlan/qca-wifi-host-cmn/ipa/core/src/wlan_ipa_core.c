@@ -217,64 +217,70 @@ static void wlan_ipa_msg_free_fn(void *buff, uint32_t len, uint32_t type)
 	qdf_mem_free(buff);
 }
 
+static void wlan_ipa_uc_loaded_handler(struct wlan_ipa_priv *ipa_ctx);
+
+static void wlan_ipa_uc_ready_work(void *data)
+{
+	struct wlan_ipa_priv *ipa_ctx = data;
+
+	qdf_mutex_acquire(&ipa_ctx->ipa_lock);
+	if (!qdf_is_recovering() &&
+	    !qdf_atomic_read(&ipa_ctx->deinit_in_prog))
+		wlan_ipa_uc_loaded_handler(ipa_ctx);
+	qdf_mutex_release(&ipa_ctx->ipa_lock);
+}
+
+/* Publish only after all uC queues, callbacks and synchronous pipes exist. */
+static void wlan_ipa_uc_ready_start(struct wlan_ipa_priv *ipa_ctx)
+{
+	qdf_spin_lock_irqsave(&ipa_ctx->uc_ready_lock);
+	ipa_ctx->uc_ready_work_enabled = true;
+	ipa_ctx->uc_op_work_enabled = true;
+	if (ipa_ctx->uc_ready_seen &&
+	    !qdf_atomic_read(&ipa_ctx->deinit_in_prog))
+		qdf_sched_work(0, &ipa_ctx->uc_ready_work);
+	qdf_spin_unlock_irqrestore(&ipa_ctx->uc_ready_lock);
+}
+
+static void wlan_ipa_uc_ready_stop(struct wlan_ipa_priv *ipa_ctx)
+{
+	qdf_spin_lock_irqsave(&ipa_ctx->uc_ready_lock);
+	ipa_ctx->uc_ready_work_enabled = false;
+	qdf_atomic_set(&ipa_ctx->deinit_in_prog, 1);
+	qdf_spin_unlock_irqrestore(&ipa_ctx->uc_ready_lock);
+	qdf_cancel_work(&ipa_ctx->uc_ready_work);
+}
+
 /**
- * wlan_ipa_uc_loaded_uc_cb() - IPA UC loaded event callback
+ * wlan_ipa_uc_loaded_uc_cb() - Remember and dispatch IPA uC readiness
  * @priv_ctxt: IPA context
  *
- * Will be called by IPA context.
- * It's atomic context, then should be scheduled to kworker thread
+ * Called in atomic context. Work publication and notification share a lock
+ * so an early event cannot be lost between queue initialization and enabling
+ * dispatch. A pending work entry is not an initialization-state indicator.
  *
  * Return: None
  */
 static void wlan_ipa_uc_loaded_uc_cb(void *priv_ctxt)
 {
-	struct wlan_ipa_priv *ipa_ctx;
-	struct op_msg_type *msg;
-	struct uc_op_work_struct *uc_op_work;
+	struct wlan_ipa_priv *ipa_ctx = priv_ctxt;
 
 	if (!ipa_cb_is_ready()) {
 		ipa_info("IPA is not READY");
 		return;
 	}
-
-	if (!priv_ctxt) {
+	if (!ipa_ctx) {
 		ipa_err("Invalid IPA context");
 		return;
 	}
 
-	ipa_ctx = priv_ctxt;
-
-	uc_op_work = &ipa_ctx->uc_op_work[WLAN_IPA_UC_OPCODE_UC_READY];
-	if (!list_empty(&uc_op_work->work.work.entry)) {
-		/* uc_op_work is not initialized yet */
-		ipa_ctx->uc_loaded = true;
-		return;
-	}
-
-	msg = qdf_mem_malloc(sizeof(*msg));
-	if (!msg)
-		return;
-
-	msg->op_code = WLAN_IPA_UC_OPCODE_UC_READY;
-
-	/* When the same uC OPCODE is already pended, just return */
-	if (uc_op_work->msg)
-		goto done;
-
-	uc_op_work->msg = msg;
-
+	qdf_spin_lock_irqsave(&ipa_ctx->uc_ready_lock);
 	if (!qdf_atomic_read(&ipa_ctx->deinit_in_prog)) {
-		qdf_sched_work(0, &uc_op_work->work);
-	} else {
-		uc_op_work->msg = NULL;
-		goto done;
+		ipa_ctx->uc_ready_seen = true;
+		if (ipa_ctx->uc_ready_work_enabled)
+			qdf_sched_work(0, &ipa_ctx->uc_ready_work);
 	}
-
-	/* work handler will free the msg buffer */
-	return;
-
-done:
-	qdf_mem_free(msg);
+	qdf_spin_unlock_irqrestore(&ipa_ctx->uc_ready_lock);
 }
 
 struct wlan_ipa_priv *wlan_ipa_get_obj_context(void)
@@ -882,6 +888,7 @@ static inline QDF_STATUS wlan_ipa_wdi_init(struct wlan_ipa_priv *ipa_ctx)
 		return QDF_STATUS_E_FAILURE;
 	}
 
+	ipa_ctx->wdi_initialized = true;
 	ipa_ctx->over_gsi =
 		QDF_IPA_WDI_INIT_OUT_PARAMS_IS_OVER_GSI(&out);
 	ipa_ctx->is_smmu_enabled =
@@ -896,6 +903,7 @@ static inline QDF_STATUS wlan_ipa_wdi_init(struct wlan_ipa_priv *ipa_ctx)
 		ipa_log_err("opt_dp: disabled from IPA, status - %d",
 			    ipa_ctx->opt_wifi_datapath);
 		ret = qdf_ipa_wdi_cleanup(ipa_ctx->hdl);
+		ipa_ctx->wdi_initialized = false;
 		if (ret)
 			ipa_info("ipa_wdi_cleanup failed ret=%d", ret);
 		ipa_set_cap_offload(false);
@@ -915,11 +923,14 @@ static inline QDF_STATUS wlan_ipa_wdi_init(struct wlan_ipa_priv *ipa_ctx)
 	return QDF_STATUS_SUCCESS;
 }
 
-static inline int wlan_ipa_wdi_cleanup(qdf_ipa_wdi_hdl_t hdl)
+static inline int wlan_ipa_wdi_cleanup(struct wlan_ipa_priv *ipa_ctx)
 {
 	int ret;
 
-	ret = qdf_ipa_wdi_cleanup(hdl);
+	if (!ipa_ctx->wdi_initialized)
+		return 0;
+	ret = qdf_ipa_wdi_cleanup(ipa_ctx->hdl);
+	ipa_ctx->wdi_initialized = false;
 	if (ret)
 		ipa_info("ipa_wdi_cleanup failed ret=%d", ret);
 	return ret;
@@ -1168,6 +1179,7 @@ static inline QDF_STATUS wlan_ipa_wdi_init(struct wlan_ipa_priv *ipa_ctx)
 		return QDF_STATUS_E_FAILURE;
 	}
 
+	ipa_ctx->wdi_initialized = true;
 	if (true == uc_ready_param.is_uC_ready) {
 		ipa_info("UC Ready");
 		ipa_ctx->uc_loaded = true;
@@ -1178,11 +1190,14 @@ static inline QDF_STATUS wlan_ipa_wdi_init(struct wlan_ipa_priv *ipa_ctx)
 	return QDF_STATUS_SUCCESS;
 }
 
-static inline int wlan_ipa_wdi_cleanup(void)
+static inline int wlan_ipa_wdi_cleanup(struct wlan_ipa_priv *ipa_ctx)
 {
 	int ret;
 
+	if (!ipa_ctx->wdi_initialized)
+		return 0;
 	ret = qdf_ipa_uc_dereg_rdyCB();
+	ipa_ctx->wdi_initialized = false;
 	if (ret)
 		ipa_info("UC Ready CB deregister fail");
 	return ret;
@@ -5668,6 +5683,13 @@ QDF_STATUS wlan_ipa_setup(struct wlan_ipa_priv *ipa_ctx,
 	qdf_mutex_create(&ipa_ctx->event_lock);
 	qdf_mutex_create(&ipa_ctx->ipa_lock);
 	qdf_atomic_init(&ipa_ctx->deinit_in_prog);
+	qdf_spinlock_create(&ipa_ctx->uc_ready_lock);
+	ipa_ctx->uc_ready_seen = false;
+	ipa_ctx->uc_ready_work_enabled = false;
+	ipa_ctx->uc_op_work_enabled = false;
+	ipa_ctx->wdi_initialized = false;
+	qdf_create_work(0, &ipa_ctx->uc_ready_work,
+			wlan_ipa_uc_ready_work, ipa_ctx);
 
 	cdp_ipa_set_smmu_mapped(ipa_ctx->dp_soc, 0);
 
@@ -5744,6 +5766,10 @@ ipa_wdi_destroy:
 	wlan_ipa_wdi_destroy_rm(ipa_ctx);
 
 fail_setup_rm:
+	wlan_ipa_uc_ready_stop(ipa_ctx);
+	wlan_ipa_wdi_cleanup(ipa_ctx);
+	qdf_destroy_work(0, &ipa_ctx->uc_ready_work);
+	qdf_spinlock_destroy(&ipa_ctx->uc_ready_lock);
 	qdf_spinlock_destroy(&ipa_ctx->pm_lock);
 	qdf_spinlock_destroy(&ipa_ctx->q_lock);
 	qdf_spinlock_destroy(&ipa_ctx->enable_disable_lock);
@@ -5797,6 +5823,7 @@ QDF_STATUS wlan_ipa_cleanup(struct wlan_ipa_priv *ipa_ctx)
 
 	if (!ipa_cb_is_ready())
 		return QDF_STATUS_SUCCESS;
+	wlan_ipa_uc_ready_stop(ipa_ctx);
 	qdf_event_destroy(&ipa_ctx->ipa_resource_comp);
 	if (!wlan_ipa_uc_is_enabled(ipa_ctx->config))
 		wlan_ipa_teardown_sys_pipe(ipa_ctx);
@@ -5827,13 +5854,15 @@ QDF_STATUS wlan_ipa_cleanup(struct wlan_ipa_priv *ipa_ctx)
 	}
 
 	if (wlan_ipa_uc_is_enabled(ipa_ctx->config)) {
-		wlan_ipa_wdi_cleanup(ipa_ctx->hdl);
+		wlan_ipa_wdi_cleanup(ipa_ctx);
 		qdf_mutex_destroy(&ipa_ctx->event_lock);
 		qdf_mutex_destroy(&ipa_ctx->ipa_lock);
 		qdf_list_destroy(&ipa_ctx->pending_event);
 
 	}
 
+	qdf_destroy_work(0, &ipa_ctx->uc_ready_work);
+	qdf_spinlock_destroy(&ipa_ctx->uc_ready_lock);
 	gp_ipa = NULL;
 
 	ipa_ctx->handle_initialized = false;
@@ -5923,7 +5952,7 @@ static void wlan_ipa_uc_loaded_handler(struct wlan_ipa_priv *ipa_ctx)
 
 	ipa_info("UC READY");
 
-	if (true == ipa_ctx->uc_loaded) {
+	if (ipa_ctx->uc_load_handled) {
 		ipa_info("UC already loaded");
 		return;
 	}
@@ -6106,14 +6135,14 @@ static inline void wlan_ipa_smmu_unmap_rx_buf(struct wlan_ipa_priv *ipa_ctx)
 }
 
 /**
- * wlan_ipa_uc_op_cb() - IPA uC operation callback
+ * wlan_ipa_uc_op_dispatch() - Synchronously dispatch a borrowed uC message
  * @op_msg: operation message received from firmware
  * @ipa_ctx: user context registered with TL (we register the IPA Global
  * context)
  *
  * Return: None
  */
-static void wlan_ipa_uc_op_cb(struct op_msg_type *op_msg,
+static void wlan_ipa_uc_op_dispatch(struct op_msg_type *op_msg,
 			      struct wlan_ipa_priv *ipa_ctx)
 {
 	struct op_msg_type *msg = op_msg;
@@ -6128,7 +6157,6 @@ static void wlan_ipa_uc_op_cb(struct op_msg_type *op_msg,
 
 	if (msg->op_code >= WLAN_IPA_UC_OPCODE_MAX) {
 		ipa_err("INVALID OPCODE %d",  msg->op_code);
-		qdf_mem_free(op_msg);
 		return;
 	}
 
@@ -6286,6 +6314,13 @@ static void wlan_ipa_uc_op_cb(struct op_msg_type *op_msg,
 			msg->op_code, ipa_ctx->stat_req_reason);
 	}
 
+}
+
+/* Firmware messages own their allocation; queue entries use a stack message. */
+static void wlan_ipa_uc_op_cb(struct op_msg_type *op_msg,
+			    struct wlan_ipa_priv *ipa_ctx)
+{
+	wlan_ipa_uc_op_dispatch(op_msg, ipa_ctx);
 	qdf_mem_free(op_msg);
 }
 
@@ -6408,61 +6443,37 @@ wlan_fw_event_msg_list_dequeue(struct uc_op_work_struct *uc_op_work)
  */
 static void __wlan_ipa_uc_fw_op_event_handler(void *data)
 {
-	struct op_msg_type *msg;
-	struct uc_op_work_struct *uc_op_work =
-				(struct uc_op_work_struct *)data;
+	struct uc_op_work_struct *uc_op_work = data;
 	struct wlan_ipa_priv *ipa_ctx = uc_op_work->ipa_priv_bp;
+	struct op_msg_type *msg;
 	struct msg_elem *notify_msg;
 
 	if (!(uc_op_work->flag & WLAN_IPA_FLAG_MSG_USES_LIST)) {
+		qdf_spin_lock_irqsave(&ipa_ctx->uc_ready_lock);
 		msg = uc_op_work->msg;
 		uc_op_work->msg = NULL;
-		ipa_debug("posted msg %d", msg->op_code);
-		wlan_ipa_uc_op_cb(msg, ipa_ctx);
-	} else if (uc_op_work->flag & WLAN_IPA_FLAG_MSG_USES_LIST_FLT_DEL) {
-		ipa_debug("filter delete notification");
-		notify_msg = wlan_fw_event_msg_list_dequeue(uc_op_work);
+		qdf_spin_unlock_irqrestore(&ipa_ctx->uc_ready_lock);
+		if (msg)
+			wlan_ipa_uc_op_cb(msg, ipa_ctx);
+		return;
+	}
+
+	if (uc_op_work->flag & WLAN_IPA_FLAG_MSG_USES_LIST_FLT_DEL)
 		qdf_event_set(&ipa_ctx->ipa_ctrl_flt_rm_shutdown_evt);
-		while (notify_msg) {
-			msg = qdf_mem_malloc(sizeof(*msg));
-			if (!msg) {
-				ipa_err("Message memory allocation failed");
-				return;
-			}
 
-			msg->ctrl_del_hdl =
-				notify_msg->hdl;
-			msg->op_code =
-				notify_msg->op_code;
-			msg->rsvd_snd = notify_msg->result;
-			ipa_debug("posted msg %d", msg->op_code);
-			wlan_ipa_uc_op_cb(msg, ipa_ctx);
-			notify_msg =
-				 wlan_fw_event_msg_list_dequeue(uc_op_work);
+	while ((notify_msg = wlan_fw_event_msg_list_dequeue(uc_op_work))) {
+		struct op_msg_type queued_msg = {0};
+
+		queued_msg.op_code = notify_msg->op_code;
+		if (uc_op_work->flag & WLAN_IPA_FLAG_MSG_USES_LIST_FLT_DEL) {
+			queued_msg.ctrl_del_hdl = notify_msg->hdl;
+			queued_msg.rsvd_snd = notify_msg->result;
+		} else {
+			queued_msg.nbuf = notify_msg->nbuf;
+			queued_msg.vdev_id = notify_msg->vdev_id;
 		}
-
-	} else {
-		ipa_debug("dequeuing msg from list");
-		notify_msg = wlan_fw_event_msg_list_dequeue(uc_op_work);
-		while (notify_msg) {
-			msg = qdf_mem_malloc(sizeof(*msg));
-			if (!msg) {
-				ipa_err("Message memory allocation failed");
-				/* Dequeue transferred ownership of this packet. */
-				qdf_nbuf_free(notify_msg->nbuf);
-				notify_msg =
-					wlan_fw_event_msg_list_dequeue(uc_op_work);
-				continue;
-			}
-
-			msg->op_code = notify_msg->op_code;
-			msg->nbuf = notify_msg->nbuf;
-			msg->vdev_id = notify_msg->vdev_id;
-			ipa_debug("posted msg %d", msg->op_code);
-			wlan_ipa_uc_op_cb(msg, ipa_ctx);
-			notify_msg =
-				wlan_fw_event_msg_list_dequeue(uc_op_work);
-		}
+		/* Dispatch is synchronous; it does not retain the message. */
+		wlan_ipa_uc_op_dispatch(&queued_msg, ipa_ctx);
 	}
 }
 
@@ -6496,7 +6507,7 @@ static void wlan_ipa_uc_op_event_handler(uint8_t *op_msg, void *ctx)
 	struct op_msg_type *msg;
 	struct uc_op_work_struct *uc_op_work;
 
-	if (!ipa_ctx)
+	if (!ipa_ctx || !op_msg)
 		goto end;
 
 	msg = (struct op_msg_type *)op_msg;
@@ -6506,14 +6517,20 @@ static void wlan_ipa_uc_op_event_handler(uint8_t *op_msg, void *ctx)
 		goto end;
 	}
 
-	uc_op_work = &ipa_ctx->uc_op_work[msg->op_code];
-	if (uc_op_work->msg) {
-		/* When the same uC OPCODE is already pended, just return */
+	if (msg->op_code == WLAN_IPA_UC_OPCODE_UC_READY) {
+		wlan_ipa_uc_loaded_uc_cb(ipa_ctx);
 		goto end;
 	}
 
+	uc_op_work = &ipa_ctx->uc_op_work[msg->op_code];
+	qdf_spin_lock_irqsave(&ipa_ctx->uc_ready_lock);
+	if (!ipa_ctx->uc_op_work_enabled || uc_op_work->msg) {
+		qdf_spin_unlock_irqrestore(&ipa_ctx->uc_ready_lock);
+		goto end;
+	}
 	uc_op_work->msg = msg;
 	qdf_sched_work(0, &uc_op_work->work);
+	qdf_spin_unlock_irqrestore(&ipa_ctx->uc_ready_lock);
 	return;
 
 end:
@@ -6564,6 +6581,9 @@ QDF_STATUS wlan_ipa_uc_ol_init(struct wlan_ipa_priv *ipa_ctx,
 						sizeof(struct op_msg_list));
 			ipa_ctx->uc_op_work[i].flag =
 						WLAN_IPA_FLAG_MSG_USES_LIST;
+			if (i == WLAN_IPA_CTRL_FILTER_DEL_NOTIFY)
+				ipa_ctx->uc_op_work[i].flag |=
+					WLAN_IPA_FLAG_MSG_USES_LIST_FLT_DEL;
 			if (!ipa_ctx->uc_op_work[i].msg_list) {
 				ipa_err("msg list struct memory allocation failed");
 				status = QDF_STATUS_E_NOMEM;
@@ -6645,6 +6665,7 @@ QDF_STATUS wlan_ipa_uc_ol_init(struct wlan_ipa_priv *ipa_ctx,
 	cdp_ipa_register_op_cb(ipa_ctx->dp_soc, IPA_DEF_PDEV_ID,
 			       wlan_ipa_uc_op_event_handler, (void *)ipa_ctx);
 	ipa_ctx->ipa_init_state = WLAN_IPA_STATE_PIPE_CONNECTION_DONE;
+	wlan_ipa_uc_ready_start(ipa_ctx);
 	goto out;
 
 free_res:
@@ -6700,10 +6721,15 @@ QDF_STATUS wlan_ipa_uc_ol_deinit(struct wlan_ipa_priv *ipa_ctx)
 	if (!wlan_ipa_uc_is_enabled(ipa_ctx->config))
 		return status;
 
+	wlan_ipa_uc_ready_stop(ipa_ctx);
 	wlan_ipa_uc_disable_pipes(ipa_ctx, true);
 	ipa_ctx->ipa_init_state = WLAN_IPA_STATE_DEINIT;
 	cdp_ipa_deregister_op_cb(ipa_ctx->dp_soc, IPA_DEF_PDEV_ID);
+	/* Pipe shutdown above may need queued filter-release acknowledgements. */
+	qdf_spin_lock_irqsave(&ipa_ctx->uc_ready_lock);
+	ipa_ctx->uc_op_work_enabled = false;
 	qdf_atomic_set(&ipa_ctx->deinit_in_prog, 1);
+	qdf_spin_unlock_irqrestore(&ipa_ctx->uc_ready_lock);
 
 	for (i = 0; i < WLAN_IPA_UC_OPCODE_MAX; i++) {
 		qdf_cancel_work(&ipa_ctx->uc_op_work[i].work);
@@ -6959,35 +6985,46 @@ wlan_is_ipa_rx_cce_port_config_enabled(struct wlan_ipa_config *ipa_cfg)
 void wlan_ipa_wdi_opt_dpath_notify_flt_rsvd(bool response)
 {
 	struct wlan_ipa_priv *ipa_ctx = gp_ipa;
-	struct op_msg_type *smmu_msg;
+	struct op_msg_type *smmu_msg = NULL;
 	struct op_msg_type *notify_msg;
-	struct uc_op_work_struct *uc_op_work;
+	struct uc_op_work_struct *map_work, *notify_work;
 
-	smmu_msg = qdf_mem_malloc(sizeof(*smmu_msg));
-	if (!smmu_msg)
+	if (!ipa_ctx)
 		return;
 
-	if (response && !ipa_get_shared_smmu_enable()) {
-		smmu_msg->op_code = WLAN_IPA_SMMU_MAP;
-		uc_op_work = &ipa_ctx->uc_op_work[WLAN_IPA_SMMU_MAP];
-		uc_op_work->msg = smmu_msg;
-		cdp_ipa_set_smmu_mapped(ipa_ctx->dp_soc, 1);
-		qdf_sched_work(0, &uc_op_work->work);
-	} else {
-		qdf_mem_free(smmu_msg);
-	}
-
+	/* Allocate the entire pair before transferring either message to work. */
 	notify_msg = qdf_mem_malloc(sizeof(*notify_msg));
-	if (!notify_msg) {
-		qdf_mem_free(smmu_msg);
+	if (!notify_msg)
 		return;
+	if (response && !ipa_get_shared_smmu_enable()) {
+		smmu_msg = qdf_mem_malloc(sizeof(*smmu_msg));
+		if (!smmu_msg) {
+			qdf_mem_free(notify_msg);
+			return;
+		}
+		smmu_msg->op_code = WLAN_IPA_SMMU_MAP;
 	}
-
 	notify_msg->op_code = WLAN_IPA_FILTER_RSV_NOTIFY;
 	notify_msg->rsvd = response;
-	uc_op_work = &ipa_ctx->uc_op_work[WLAN_IPA_FILTER_RSV_NOTIFY];
-	uc_op_work->msg = notify_msg;
-	qdf_sched_work(0, &uc_op_work->work);
+	map_work = &ipa_ctx->uc_op_work[WLAN_IPA_SMMU_MAP];
+	notify_work = &ipa_ctx->uc_op_work[WLAN_IPA_FILTER_RSV_NOTIFY];
+
+	qdf_spin_lock_irqsave(&ipa_ctx->uc_ready_lock);
+	if (!ipa_ctx->uc_op_work_enabled || notify_work->msg ||
+	    (smmu_msg && map_work->msg)) {
+		qdf_spin_unlock_irqrestore(&ipa_ctx->uc_ready_lock);
+		qdf_mem_free(smmu_msg);
+		qdf_mem_free(notify_msg);
+		return;
+	}
+	if (smmu_msg) {
+		map_work->msg = smmu_msg;
+		cdp_ipa_set_smmu_mapped(ipa_ctx->dp_soc, 1);
+		qdf_sched_work(0, &map_work->work);
+	}
+	notify_work->msg = notify_msg;
+	qdf_sched_work(0, &notify_work->work);
+	qdf_spin_unlock_irqrestore(&ipa_ctx->uc_ready_lock);
 }
 
 int wlan_ipa_wdi_opt_dpath_flt_rsrv_cb(
@@ -7463,8 +7500,10 @@ void wlan_ipa_wdi_opt_dpath_notify_flt_rlsd(int flt0_rslt, int flt1_rslt)
 	struct wifi_dp_flt_setup *dp_flt_params = NULL;
 	struct wlan_ipa_priv *ipa_ctx = gp_ipa;
 	struct op_msg_type *notify_msg;
-	struct uc_op_work_struct *uc_op_work;
 	bool result = false;
+
+	if (!ipa_ctx)
+		return;
 
 	qdf_event_set(&ipa_ctx->ipa_flt_evnt);
 	if (ipa_ctx->opt_dp_flt_rel_state ==
@@ -7510,9 +7549,7 @@ void wlan_ipa_wdi_opt_dpath_notify_flt_rlsd(int flt0_rslt, int flt1_rslt)
 
 	notify_msg->op_code = WLAN_IPA_FILTER_REL_NOTIFY;
 	notify_msg->rsvd = result;
-	uc_op_work = &ipa_ctx->uc_op_work[WLAN_IPA_FILTER_REL_NOTIFY];
-	uc_op_work->msg = notify_msg;
-	qdf_sched_work(0, &uc_op_work->work);
+	wlan_ipa_uc_op_event_handler((uint8_t *)notify_msg, ipa_ctx);
 
 	if (!result) {
 		ipa_err("opt_dp: received filter release failure from FW");
@@ -8112,14 +8149,19 @@ void wlan_ipa_wdi_opt_dpath_ctrl_notify_flt_delete(struct filter_response
 							false;
 		}
 
-		uc_op_work->flag |= WLAN_IPA_FLAG_MSG_USES_LIST_FLT_DEL;
+		qdf_spin_lock_irqsave(&ipa_obj->uc_ready_lock);
+		if (!ipa_obj->uc_op_work_enabled) {
+			qdf_spin_unlock_irqrestore(&ipa_obj->uc_ready_lock);
+			return;
+		}
 		status = wlan_fw_event_msg_list_enqueue_flt_hdl(
 						uc_op_work,
 						WLAN_IPA_CTRL_FILTER_DEL_NOTIFY,
 						hdl, code);
+		if (status == QDF_STATUS_SUCCESS)
+			qdf_sched_work(0, &uc_op_work->work);
+		qdf_spin_unlock_irqrestore(&ipa_obj->uc_ready_lock);
 	}
-
-	qdf_sched_work(0, &uc_op_work->work);
 }
 #endif
 #endif /* IPA_OPT_WIFI_DP */
@@ -8132,7 +8174,8 @@ QDF_STATUS wlan_ipa_get_alt_pipe(struct wlan_ipa_priv *ipa_ctx,
 	struct wlan_ipa_iface_context *ctxt;
 	uint8_t iface_id;
 
-	if (qdf_unlikely(!ipa_ctx || !alt_pipe))
+	if (qdf_unlikely(!ipa_ctx || !alt_pipe ||
+			 vdev_id >= WLAN_IPA_MAX_SESSION))
 		return QDF_STATUS_E_INVAL;
 
 	iface_id = ipa_ctx->vdev_to_iface[vdev_id];
@@ -8162,6 +8205,17 @@ void wlan_ipa_tx_pkt_opt_dp_ctrl(uint8_t vdev_id, qdf_nbuf_t nbuf)
 	struct wlan_ipa_priv *ipa_ctx = gp_ipa;
 	QDF_STATUS status;
 
+	if (!ipa_ctx) {
+		qdf_nbuf_free(nbuf);
+		return;
+	}
+	qdf_spin_lock_irqsave(&ipa_ctx->uc_ready_lock);
+	if (!ipa_ctx->uc_op_work_enabled) {
+		qdf_spin_unlock_irqrestore(&ipa_ctx->uc_ready_lock);
+		qdf_nbuf_free(nbuf);
+		return;
+	}
+
 	ipa_debug("opt_dp_ctrl: schedule WQ for vdev id %u", vdev_id);
 	uc_op_work =
 		&ipa_ctx->uc_op_work[WLAN_IPA_CTRL_TX_REINJECT];
@@ -8171,12 +8225,13 @@ void wlan_ipa_tx_pkt_opt_dp_ctrl(uint8_t vdev_id, qdf_nbuf_t nbuf)
 	if (status != QDF_STATUS_SUCCESS) {
 		ipa_log_err("nbuf message enqueue failed");
 		ipa_ctx->ctrl_stats.reinject_pkt_enq_fail_cnt++;
+		qdf_spin_unlock_irqrestore(&ipa_ctx->uc_ready_lock);
 		qdf_nbuf_free(nbuf);
 		return;
 	}
 
-	uc_op_work->flag |= WLAN_IPA_FLAG_MSG_USES_LIST;
 	qdf_sched_work(0, &uc_op_work->work);
+	qdf_spin_unlock_irqrestore(&ipa_ctx->uc_ready_lock);
 }
 
 #endif

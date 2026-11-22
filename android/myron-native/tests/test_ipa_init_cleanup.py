@@ -62,8 +62,8 @@ struct uc_op_work_struct {
 };
 struct wlan_ipa_priv {
  int config,dp_soc,ipa_init_state,tx_pipe_handle,rx_pipe_handle,hdl;
- int deinit_in_prog,ipa_lock,ipa_ctrl_flt_rm_shutdown_evt;
- bool uc_loaded,uc_load_handled;
+ int deinit_in_prog,ipa_lock,ipa_ctrl_flt_rm_shutdown_evt,uc_ready_lock;
+ bool uc_loaded,uc_load_handled,uc_op_work_enabled;
  uint8_t vdev_to_iface[WLAN_IPA_MAX_SESSION];
  bool vdev_offload_enabled[WLAN_IPA_MAX_SESSION],disable_intrabss_fwd[WLAN_IPA_MAX_SESSION];
  struct uc_op_work_struct uc_op_work[WLAN_IPA_UC_OPCODE_MAX];struct work mcc_work;
@@ -80,11 +80,15 @@ static void qdf_nbuf_free(struct packet *p){assert(p && p->live==1);p->live=0;}
 static void qdf_spin_lock_bh(int *p){assert(*p==1);*p=2;}
 static void qdf_spin_unlock_bh(int *p){assert(*p==2);*p=1;}
 static void qdf_event_set(int *p){*p=1;}
-static void wlan_ipa_uc_op_cb(struct op_msg_type *msg,struct wlan_ipa_priv *ctx){
+static void wlan_ipa_uc_op_dispatch(struct op_msg_type *msg,struct wlan_ipa_priv *ctx){
  assert(ctx);dispatched++;
  if(msg->op_code==WLAN_IPA_CTRL_TX_REINJECT)qdf_nbuf_free(msg->nbuf);
- qdf_mem_free(msg);
 }
+static void wlan_ipa_uc_op_cb(struct op_msg_type *msg,struct wlan_ipa_priv *ctx){
+ wlan_ipa_uc_op_dispatch(msg,ctx);qdf_mem_free(msg);
+}
+static void wlan_ipa_uc_ready_start(struct wlan_ipa_priv *ctx){ctx->uc_op_work_enabled=true;}
+static void wlan_ipa_uc_ready_stop(struct wlan_ipa_priv *ctx){ctx->deinit_in_prog=1;}
 static void qdf_spinlock_create(int *p){assert(!*p);*p=1;locks++;}
 static void qdf_spinlock_destroy(int *p){assert(*p==1);*p=0;locks--;}
 static void qdf_create_work(int id,struct work *w,void (*cb)(void *),void *arg){
@@ -114,8 +118,10 @@ static int wlan_ipa_init_perf_level(struct wlan_ipa_priv *p){(void)p;return 0;}
 static void cdp_ipa_register_op_cb(int soc,int id,void (*cb)(void *),void *p){
  (void)soc;(void)id;(void)cb;(void)p;registered++;
 }
-static void wlan_ipa_uc_disable_pipes(struct wlan_ipa_priv *p,bool force){(void)p;(void)force;}
+static void wlan_ipa_uc_disable_pipes(struct wlan_ipa_priv *p,bool force){assert(p->uc_op_work_enabled);(void)force;}
 static void cdp_ipa_deregister_op_cb(int soc,int id){(void)soc;(void)id;assert(registered==1);registered--;}
+#define qdf_spin_lock_irqsave(p) ((void)(p))
+#define qdf_spin_unlock_irqrestore(p) ((void)(p))
 #define qdf_atomic_set(p,n) (*(p)=(n))
 #define qdf_mutex_acquire(p) (++*(p))
 #define qdf_mutex_release(p) (--*(p))
@@ -135,6 +141,7 @@ static void release_success(struct wlan_ipa_priv *p){
  assert(allocations==4 && locks==2 && registered==1);
  assert(wlan_ipa_uc_ol_deinit(p)==0);
  assert(!p->uc_load_handled && !p->ipa_lock && p->deinit_in_prog==1);
+ assert(!p->uc_op_work_enabled);
  assert_unwound(p);
 }
 '''
@@ -187,9 +194,10 @@ int main(void){
      .op_code=WLAN_IPA_CTRL_TX_REINJECT,.vdev_id=j,.nbuf=&packets[j]};
    }
    dispatched=0;fail_alloc=alloc_call+failure;fail_all=(failure==count+1);
+   int before=alloc_call;
    __wlan_ipa_uc_fw_op_event_handler(w);
-   assert(l->tp==l->hp);
-   assert(dispatched==(fail_all?0:count-(failure>0 && failure<=count)));
+   assert(l->tp==l->hp && alloc_call==before);
+   assert(dispatched==count);
    for(int j=0;j<count;j++)assert(!packets[j].live);
    fail_all=0;fail_alloc=0;release_success(&ctx);cases++;
   }
@@ -210,6 +218,20 @@ int main(void){
   release_success(&ctx);
   for(int j=0;j<count;j++)assert(!packets[j].live);
   assert(sentinel.live==1);cases++;
+ }
+ for(int start=0;start<16;start++)for(int count=0;count<16;count++){
+  memset(&ctx,0,sizeof(ctx));ctx.config=1;
+  assert(wlan_ipa_uc_ol_init(&ctx,&ctx)==0);
+  struct uc_op_work_struct *w=&ctx.uc_op_work[WLAN_IPA_CTRL_FILTER_DEL_NOTIFY];
+  w->flag |= WLAN_IPA_FLAG_MSG_USES_LIST_FLT_DEL;
+  struct op_msg_list *l=w->msg_list;l->tp=start;l->hp=(start+count)&15;
+  for(int j=0;j<count;j++)l->entries[(start+j)&15]=(struct msg_elem){
+   .op_code=WLAN_IPA_CTRL_FILTER_DEL_NOTIFY,.hdl=j,.result=j+1};
+  dispatched=0;fail_all=1;int before=alloc_call;
+  __wlan_ipa_uc_fw_op_event_handler(w);
+  assert(dispatched==count && alloc_call==before && l->tp==l->hp);
+  assert(ctx.ipa_ctrl_flt_rm_shutdown_evt==1);
+  fail_all=0;release_success(&ctx);cases++;
  }
  printf("PASS: %d IPA lifecycle/queue cases; packet ownership/OOM/wrap/cancel; allocation failures/retry; work/lock cleanup; SMMU unwind; teardown readiness\n",cases);
 }

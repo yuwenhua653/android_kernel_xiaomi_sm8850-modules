@@ -3203,6 +3203,8 @@ int ipa3_uc_reg_rdyCB(struct ipa_wdi_uc_ready_params *param);
  */
 int ipa3_uc_dereg_rdyCB(void);
 
+void ipa3_uc_dereg_rdyCB_by_priv(void *priv);
+
 int ipa_create_uc_smmu_mapping(int res_idx, bool wlan_smmu_en,
 		phys_addr_t pa, struct sg_table *sgt, size_t len, bool device,
 		unsigned long *iova);

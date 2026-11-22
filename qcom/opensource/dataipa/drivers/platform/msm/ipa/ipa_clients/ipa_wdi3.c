@@ -2166,7 +2166,6 @@ int ipa_wdi_cleanup_per_inst(ipa_wdi_hdl_t hdl)
 	struct ipa_wdi_intf_info *entry;
 	struct ipa_wdi_intf_info *next;
 
-	IPA_WDI_DBG("client hdl = %d, Instance = %d\n", hdl,ipa_wdi_ctx_list[hdl]->inst_id);
 	if (hdl < 0 || hdl >= IPA_WDI_INST_MAX) {
 		IPA_WDI_ERR("Invalid Handle %d\n",hdl);
 		 return -EFAULT;
@@ -2185,6 +2184,11 @@ int ipa_wdi_cleanup_per_inst(ipa_wdi_hdl_t hdl)
 		return -EPERM;
 	}
 
+	IPA_WDI_DBG("client hdl = %d, Instance = %d\n",
+		    hdl, ipa_wdi_ctx_list[hdl]->inst_id);
+	/* Detach this instance's callback before its WLAN context can disappear. */
+	ipa3_uc_dereg_rdyCB_by_priv(opt_dpath_info[hdl].priv);
+
 	/* clear interface list */
 	list_for_each_entry_safe(entry, next,
 		&ipa_wdi_ctx_list[hdl]->head_intf_list, link) {
@@ -2199,9 +2203,10 @@ int ipa_wdi_cleanup_per_inst(ipa_wdi_hdl_t hdl)
 	mutex_destroy(&ipa_wdi_ctx_list[hdl]->lock);
 	mutex_destroy(&ipa_wdi_ctx_list[hdl]->clk_lock);
 	kfree(ipa_wdi_ctx_list[hdl]);
-	opt_dpath_info[0].ipa_ep_idx_rx = 0;
-	opt_dpath_info[0].ipa_ep_idx_tx = 0;
+	opt_dpath_info[hdl].ipa_ep_idx_rx = 0;
+	opt_dpath_info[hdl].ipa_ep_idx_tx = 0;
 	ipa_wdi_ctx_list[hdl] = NULL;
+	opt_dpath_info[hdl].priv = NULL;
 	return 0;
 }
 EXPORT_SYMBOL(ipa_wdi_cleanup_per_inst);

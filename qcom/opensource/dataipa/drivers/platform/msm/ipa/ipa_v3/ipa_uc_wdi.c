@@ -57,6 +57,9 @@ struct ipa_wdi_res {
 
 static struct ipa_wdi_res wdi_res[IPA_WDI_MAX_RES];
 
+/* Ready callbacks run atomically and must not register/unregister themselves. */
+static DEFINE_SPINLOCK(ipa_uc_wdi_ready_lock);
+
 static void ipa3_uc_wdi_loaded_handler(void);
 
 /**
@@ -3199,6 +3202,7 @@ uc_timeout:
 int ipa3_uc_reg_rdyCB(
 	struct ipa_wdi_uc_ready_params *inout)
 {
+	unsigned long flags;
 	int result = 0;
 
 	if (inout == NULL) {
@@ -3206,14 +3210,21 @@ int ipa3_uc_reg_rdyCB(
 		return -EINVAL;
 	}
 
+	spin_lock_irqsave(&ipa_uc_wdi_ready_lock, flags);
 	result = ipa3_uc_state_check();
 	if (result) {
+		if (ipa3_ctx->uc_wdi_ctx.uc_ready_cb &&
+		    ipa3_ctx->uc_wdi_ctx.priv != inout->priv) {
+			spin_unlock_irqrestore(&ipa_uc_wdi_ready_lock, flags);
+			return -EBUSY;
+		}
 		inout->is_uC_ready = false;
 		ipa3_ctx->uc_wdi_ctx.uc_ready_cb = inout->notify;
 		ipa3_ctx->uc_wdi_ctx.priv = inout->priv;
 	} else {
 		inout->is_uC_ready = true;
 	}
+	spin_unlock_irqrestore(&ipa_uc_wdi_ready_lock, flags);
 
 	return 0;
 }
@@ -3227,11 +3238,29 @@ EXPORT_SYMBOL(ipa3_uc_reg_rdyCB);
  */
 int ipa3_uc_dereg_rdyCB(void)
 {
+	unsigned long flags;
+
+	spin_lock_irqsave(&ipa_uc_wdi_ready_lock, flags);
 	ipa3_ctx->uc_wdi_ctx.uc_ready_cb = NULL;
 	ipa3_ctx->uc_wdi_ctx.priv = NULL;
+	spin_unlock_irqrestore(&ipa_uc_wdi_ready_lock, flags);
 
 	return 0;
 }
+
+/* Also waits for an already executing atomic callback before the owner frees. */
+void ipa3_uc_dereg_rdyCB_by_priv(void *priv)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&ipa_uc_wdi_ready_lock, flags);
+	if (ipa3_ctx->uc_wdi_ctx.priv == priv) {
+		ipa3_ctx->uc_wdi_ctx.uc_ready_cb = NULL;
+		ipa3_ctx->uc_wdi_ctx.priv = NULL;
+	}
+	spin_unlock_irqrestore(&ipa_uc_wdi_ready_lock, flags);
+}
+EXPORT_SYMBOL_GPL(ipa3_uc_dereg_rdyCB_by_priv);
 
 
 /**
@@ -3273,19 +3302,20 @@ EXPORT_SYMBOL(ipa_uc_wdi_get_dbpa);
 
 static void ipa3_uc_wdi_loaded_handler(void)
 {
+	unsigned long flags;
+
 	if (!ipa3_ctx) {
 		IPAERR("IPA ctx is null\n");
 		return;
 	}
 
+	spin_lock_irqsave(&ipa_uc_wdi_ready_lock, flags);
 	if (ipa3_ctx->uc_wdi_ctx.uc_ready_cb) {
-		ipa3_ctx->uc_wdi_ctx.uc_ready_cb(
-			ipa3_ctx->uc_wdi_ctx.priv);
-
-		ipa3_ctx->uc_wdi_ctx.uc_ready_cb =
-			NULL;
+		ipa3_ctx->uc_wdi_ctx.uc_ready_cb(ipa3_ctx->uc_wdi_ctx.priv);
+		ipa3_ctx->uc_wdi_ctx.uc_ready_cb = NULL;
 		ipa3_ctx->uc_wdi_ctx.priv = NULL;
 	}
+	spin_unlock_irqrestore(&ipa_uc_wdi_ready_lock, flags);
 }
 
 int ipa3_create_wdi_mapping(u32 num_buffers, struct ipa_wdi_buffer_info *info)
