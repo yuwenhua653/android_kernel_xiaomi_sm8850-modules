@@ -5087,7 +5087,7 @@ static int cnss_pci_suspend(struct device *dev)
 		ret = pci_save_state(pci_dev);
 		if (ret) {
 			cnss_pr_err("failed to save pci state\n");
-			goto clear_flag;
+			goto resume_driver;
 		}
 	}
 
