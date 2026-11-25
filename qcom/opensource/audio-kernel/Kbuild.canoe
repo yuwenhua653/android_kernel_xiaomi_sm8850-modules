@@ -5,6 +5,7 @@
 ccflags-y += -I$(src)/include -I$(src)/include/uapi/audio -I$(src)/config
 ccflags-y += -I$(src)/../mm-drivers/msm_ext_display/include
 ccflags-y += -I$(srctree)
+KBUILD_EXTRA_SYMBOLS += $(abspath $(obj)/../mm-drivers/msm_ext_display/Module.symvers)
 
 # The DDK target enables these features across all Canoe audio objects.
 ccflags-y += -DCONFIG_AUDIO_BTFM_PROXY
