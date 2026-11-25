@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-only
+securemsm := ../../../qcom/opensource/securemsm-kernel
+ccflags-y += -I$(src)/include/uapi/linux/nfc -I$(src)/$(securemsm)/include
+ccflags-y += -I$(src)/$(securemsm)/include/linux -I$(src)/$(securemsm)/include/uapi/linux
+ccflags-y += -DCONFIG_NFC_BOB1 -DNFC_SECURE_PERIPHERAL_ENABLED
+KBUILD_EXTRA_SYMBOLS += $(abspath $(obj)/$(securemsm)/Module.symvers)
+
+obj-m += stm_nfc_i2c.o
+stm_nfc_i2c-y := nfc/st21nfc.o
+
+obj-m += stm_st54se_gpio.o
+stm_st54se_gpio-y := nfc/st54spi_gpio.o
