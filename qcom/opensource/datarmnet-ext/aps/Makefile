@@ -2,11 +2,13 @@
 RMNET_APS_SELECT := CONFIG_RMNET_APS=m
 KBUILD_OPTIONS += $(RMNET_APS_SELECT)
 KBUILD_OPTIONS += $(KBUILD_EXTRA) # Extra config if any
-KBUILD_EXTRA_SYMBOLS := $(M)/../../$(DATARMNET_CORE_PATH)/Module.symvers
 
 M ?= $(shell pwd)
 
-all:
+.PHONY: all modules modules_install clean
+all: modules
+
+modules:
 	$(MAKE) -C $(KERNEL_SRC) M=$(M) modules $(KBUILD_OPTIONS)
 
 modules_install:

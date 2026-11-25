@@ -40,3 +40,15 @@ obj-m += qce50_dlkm.o
 qce50_dlkm-y := crypto-qti/qce50.o
 obj-m += qcedev-mod_dlkm.o
 qcedev-mod_dlkm-y := crypto-qti/qcedev.o crypto-qti/qcedev_smmu.o crypto-qti/compat_qcedev.o
+
+ifeq ($(CONFIG_TARGET_PRODUCT_NEZHA),y)
+obj-m += qrng_dlkm.o qcrypto-msm_dlkm.o tmecom-intf_dlkm.o tz_log_dlkm.o
+qrng_dlkm-y := qrng/msm_rng.o
+qcrypto-msm_dlkm-y := crypto-qti/qcrypto.o
+tmecom-intf_dlkm-y := tmecom/tmecom.o tmecom/tmelog.o
+tz_log_dlkm-y := tz_log/tz_log.o
+
+CFLAGS_tmecom/tmecom.o += -DCONFIG_MSM_TMECOM_QMP=1
+CFLAGS_tmecom/tmelog.o += -DCONFIG_MSM_TMECOM_QMP=1
+CFLAGS_tz_log/tz_log.o += -DCONFIG_MSM_TMECOM_QMP=1 -DCONFIG_TZLOG_TIME_CONSOLIDATE=1
+endif

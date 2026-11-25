@@ -5,7 +5,10 @@ KBUILD_OPTIONS += $(KBUILD_EXTRA) # Extra config if any
 
 M ?= $(shell pwd)
 
-all:
+.PHONY: all modules modules_install clean
+all: modules
+
+modules:
 	$(MAKE) -C $(KERNEL_SRC) M=$(M) modules $(KBUILD_OPTIONS)
 
 modules_install:

@@ -1,3 +1,10 @@
+ifeq ($(CONFIG_ARCH_CANOE),y)
+RMNET_CORE_INC_DIR := $(src)/../../datarmnet/core
+KBUILD_EXTRA_SYMBOLS += $(abspath $(obj)/../../datarmnet/Module.symvers)
+else ifneq ($(DATARMNET_CORE_PATH),)
+KBUILD_EXTRA_SYMBOLS += $(abspath $(obj)/../../$(DATARMNET_CORE_PATH)/Module.symvers)
+endif
+
 obj-m += rmnet_perf_tether.o
 #Need core headers
 ccflags-y := -I$(RMNET_CORE_INC_DIR) \

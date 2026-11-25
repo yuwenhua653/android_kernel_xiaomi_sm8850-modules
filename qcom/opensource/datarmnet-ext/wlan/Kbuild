@@ -1,6 +1,14 @@
+ifeq ($(CONFIG_ARCH_CANOE),y)
+RMNET_CORE_INC_DIR := $(src)/../../datarmnet/core
+KBUILD_EXTRA_SYMBOLS += $(abspath $(obj)/../../datarmnet/Module.symvers)
+else ifneq ($(DATARMNET_CORE_PATH),)
+KBUILD_EXTRA_SYMBOLS += $(abspath $(obj)/../../$(DATARMNET_CORE_PATH)/Module.symvers)
+endif
+
 obj-m += rmnet_wlan.o
 ccflags-y := -I$(RMNET_CORE_INC_DIR) \
 	$(call cc-option,-Wno-misleading-indentation)
+ccflags-y += -I$(src)/include
 rmnet_wlan-y := \
 	rmnet_wlan_main.o \
 	rmnet_wlan_genl.o \
