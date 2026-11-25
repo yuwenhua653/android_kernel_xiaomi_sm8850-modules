@@ -27,30 +27,31 @@
 
 static int __init ipa_late_init(void)
 {
-	int rc = 0;
+	int rc;
 
 	IPADBG("IPA late init\n");
 
-	rc = ipa3_wwan_platform_driver_register();
-	if (rc) {
-		IPAERR("ipa3_wwan_platform_driver_register failed: %d\n",
-			   rc);
-		ipa3_wwan_cleanup();
-	}
-
+	/* Set up USB client logging before publishing the WWAN driver. */
 	rc = rndis_ipa_init_module();
-	if (rc) {
-		IPAERR("rndis_ipa_init_module failed: %d\n",
-			   rc);
-		rndis_ipa_cleanup_module();
-	}
+	if (rc)
+		return rc;
 
 	rc = ncm_ipa_init_module();
+	if (rc)
+		goto err_rndis;
+
+	rc = ipa3_wwan_platform_driver_register();
 	if (rc) {
-		IPAERR("ncm_ipa_init_module failed: %d\n",
-			   rc);
-		ncm_ipa_cleanup_module();
+		IPAERR("WWAN driver registration failed: %d\n", rc);
+		goto err_ncm;
 	}
+
+	return 0;
+
+err_ncm:
+	ncm_ipa_cleanup_module();
+err_rndis:
+	rndis_ipa_cleanup_module();
 	return rc;
 }
 fs_initcall(ipa_late_init);
@@ -59,8 +60,8 @@ static void __exit ipa_late_exit(void)
 {
 	IPADBG("IPA late exit\n");
 	ipa3_wwan_cleanup();
-	rndis_ipa_cleanup_module();
 	ncm_ipa_cleanup_module();
+	rndis_ipa_cleanup_module();
 }
 module_exit(ipa_late_exit);
 
