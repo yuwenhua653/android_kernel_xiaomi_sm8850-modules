@@ -32,6 +32,7 @@
 
 #define CAM_SENSOR_NAME    "cam-sensor"
 #define CAM_ACTUATOR_NAME  "cam-actuator"
+#define CAM_ZOOM_NAME      "cam-zoom"
 #define CAM_CSIPHY_NAME    "cam-csiphy"
 #define CAM_FLASH_NAME     "cam-flash"
 #define CAM_EEPROM_NAME    "cam-eeprom"
@@ -96,6 +97,7 @@ enum sensor_sub_module {
 	SUB_MODULE_CSIPHY,
 	SUB_MODULE_OIS,
 	SUB_MODULE_EXT,
+	SUB_MODULE_ZOOM,
 	SUB_MODULE_MAX,
 };
 

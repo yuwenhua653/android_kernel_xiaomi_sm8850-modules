@@ -37,11 +37,17 @@ extern struct platform_driver cam_res_mgr_driver;
 extern struct platform_driver cci_driver;
 extern struct platform_driver csiphy_driver;
 extern struct platform_driver cam_actuator_platform_driver;
+#ifdef CONFIG_TARGET_PRODUCT_NEZHA
+extern struct platform_driver cam_zoom_platform_driver;
+#endif
 extern struct platform_driver cam_sensor_platform_driver;
 extern struct platform_driver cam_eeprom_platform_driver;
 extern struct platform_driver cam_ois_platform_driver;
 extern struct platform_driver cam_tpg_driver;
 extern struct i2c_driver cam_actuator_i2c_driver;
+#ifdef CONFIG_TARGET_PRODUCT_NEZHA
+extern struct i2c_driver cam_zoom_i2c_driver;
+#endif
 extern struct i2c_driver cam_flash_i2c_driver;
 extern struct i2c_driver cam_ois_i2c_driver;
 extern struct i2c_driver cam_eeprom_i2c_driver;
@@ -118,6 +124,9 @@ static struct platform_driver *const cam_component_platform_drivers[] = {
 	&cci_driver,
 	&csiphy_driver,
 	&cam_actuator_platform_driver,
+#ifdef CONFIG_TARGET_PRODUCT_NEZHA
+	&cam_zoom_platform_driver,
+#endif
 	&cam_sensor_platform_driver,
 	&cam_eeprom_platform_driver,
 	&cam_ois_platform_driver,
@@ -168,6 +177,9 @@ static struct platform_driver *const cam_component_platform_drivers[] = {
 static struct i2c_driver *const cam_component_i2c_drivers[] = {
 #ifdef CONFIG_SPECTRA_SENSOR
 	&cam_actuator_i2c_driver,
+#ifdef CONFIG_TARGET_PRODUCT_NEZHA
+	&cam_zoom_i2c_driver,
+#endif
 	&cam_flash_i2c_driver,
 	&cam_ois_i2c_driver,
 	&cam_eeprom_i2c_driver,

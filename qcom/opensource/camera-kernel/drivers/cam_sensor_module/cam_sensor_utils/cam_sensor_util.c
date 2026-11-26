@@ -2863,7 +2863,7 @@ int cam_sensor_util_parse_and_request_resources(struct camera_io_master *io_mast
 		soc_info->clk[i] = devm_clk_get(soc_info->dev,
 			soc_info->clk_name[i]);
 		if (IS_ERR_OR_NULL(soc_info->clk[i])) {
-			rc = PTR_ERR(soc_info->rgltr[i]);
+			rc = PTR_ERR(soc_info->clk[i]);
 			rc = rc ? rc : -EINVAL;
 			CAM_ERR(CAM_SENSOR_UTIL, "get failed for %s",
 				soc_info->clk_name[i]);

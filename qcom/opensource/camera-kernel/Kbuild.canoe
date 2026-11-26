@@ -414,3 +414,14 @@ CFLAGS_drivers/cam_sensor_module/cam_flash/cam_flash_soc.o += -include $(src)/co
 CFLAGS_drivers/cam_sensor_module/cam_sensor_module_debug.o += -include $(src)/config/canoe/camera.h
 CFLAGS_drivers/cam_presil/stub/cam_presil_hw_access_stub.o += -include $(src)/config/canoe/camera.h
 CFLAGS_drivers/cam_utils/cam_io_util.o += -include $(src)/config/canoe/camera.h
+
+# Nezha optical zoom, ported from MiCode songyuan-w-oss.
+ifeq ($(CONFIG_TARGET_PRODUCT_NEZHA),y)
+ccflags-y += -I$(src)/drivers/cam_sensor_module/cam_zoom
+camera-y += drivers/cam_sensor_module/cam_zoom/cam_zoom_core.o drivers/cam_sensor_module/cam_zoom/cam_zoom_dev.o drivers/cam_sensor_module/cam_zoom/cam_zoom_soc.o drivers/cam_sensor_module/cam_zoom/Sem1218s_zoom.o drivers/cam_sensor_module/cam_sensor_io/xm_cam_dev_protection.o
+CFLAGS_drivers/cam_sensor_module/cam_zoom/cam_zoom_core.o += -include $(src)/config/canoe/camera.h
+CFLAGS_drivers/cam_sensor_module/cam_zoom/cam_zoom_dev.o += -include $(src)/config/canoe/camera.h
+CFLAGS_drivers/cam_sensor_module/cam_zoom/cam_zoom_soc.o += -include $(src)/config/canoe/camera.h
+CFLAGS_drivers/cam_sensor_module/cam_zoom/Sem1218s_zoom.o += -include $(src)/config/canoe/camera.h
+CFLAGS_drivers/cam_sensor_module/cam_sensor_io/xm_cam_dev_protection.o += -include $(src)/config/canoe/camera.h
+endif

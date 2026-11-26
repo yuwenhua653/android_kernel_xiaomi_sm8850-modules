@@ -1370,4 +1370,41 @@ struct cam_flash_query_cap_info_v2 {
 	__u32    params[3];
 } __attribute__ ((packed));
 
+
+#define MAX_ZOOM_NAME_SIZE 64
+
+enum cam_zoom_packet_opcodes {
+	CAM_ZOOM_PACKET_OPCODE_INIT,
+	CAM_ZOOM_PACKET_AUTO_MOVE_LENS,
+	CAM_ZOOM_PACKET_MANUAL_MOVE_LENS,
+	CAM_ZOOM_PACKET_OPCODE_READ,
+	CAM_ZOOM_PACKET_OPCODE_PROBE = 5,
+	CAM_ZOOM_PACKET_NOP_OPCODE = 127,
+};
+
+struct cam_zoom_query_cap {
+	__u32            slot_info;
+	__u32            reserved;
+} __attribute__((packed));
+
+struct cam_cmd_zoom_info {
+	__u32    slave_addr;
+	__u8     i2c_freq_mode;
+	__u8     cmd_type;
+	__u16    reserved;
+	__u32    zoom_3polefw_version;
+	__u32    zoom_5polefw_version;
+	__u32    zoom_5poleP2fw_version;
+	__u32	 zoom_5poleP2Recalfw_version;
+	__u32    zoom_hw_version;
+	char     zoom_name[MAX_ZOOM_NAME_SIZE];
+	__u8     noupdate_fw_flash;
+} __attribute__((packed));
+
+/* OS4 Nezha sensor capability ABI; the generic ABI remains 40 bytes. */
+struct cam_sensor_query_cap_nezha {
+	struct cam_sensor_query_cap base;
+	__u32 zoom_slot_id;
+} __attribute__((packed));
+
 #endif

@@ -1705,12 +1705,18 @@ int32_t cam_sensor_driver_cmd(struct cam_sensor_ctrl_t *s_ctrl,
 	}
 		break;
 	case CAM_QUERY_CAP: {
-		struct  cam_sensor_query_cap sensor_cap;
+		struct cam_sensor_query_cap_nezha sensor_cap = { 0 };
+		size_t cap_size = sizeof(sensor_cap.base);
 
 		CAM_DBG(CAM_SENSOR, "%s Sensor Queried", s_ctrl->sensor_name);
-		cam_sensor_query_cap(s_ctrl, &sensor_cap);
+		cam_sensor_query_cap(s_ctrl, &sensor_cap.base);
+		if (IS_ENABLED(CONFIG_TARGET_PRODUCT_NEZHA)) {
+			sensor_cap.zoom_slot_id =
+				s_ctrl->sensordata->subdev_id[SUB_MODULE_ZOOM];
+			cap_size = sizeof(sensor_cap);
+		}
 		if (copy_to_user(u64_to_user_ptr(cmd->handle),
-			&sensor_cap, sizeof(struct  cam_sensor_query_cap))) {
+			&sensor_cap, cap_size)) {
 			CAM_ERR(CAM_SENSOR, "Failed Copy to User");
 			rc = -EFAULT;
 			goto release_mutex;

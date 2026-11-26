@@ -66,7 +66,8 @@ extern unsigned int debug_bypass_drivers;
 #define CAM_VMRM                BIT_ULL(37)
 #define CAM_SENSOR_IO           BIT_ULL(38)
 #define CAM_WORKER              BIT_ULL(39)
-#define CAM_DBG_MOD_MAX         40
+#define CAM_ZOOM                BIT_ULL(40)
+#define CAM_DBG_MOD_MAX         41
 
 /* Log level types */
 enum cam_debug_log_level {
@@ -128,6 +129,7 @@ static const char *cam_debug_mod_name[CAM_DBG_MOD_MAX] = {
 	"CAM-VMRM",
 	"CAM_SENSOR_IO",
 	"CAM-WORKER",
+	"CAM-ZOOM",
 };
 
 #define ___CAM_DBG_MOD_NAME(module_id)                                      \
@@ -171,7 +173,8 @@ __builtin_choose_expr(((module_id) == CAM_SYNX), "CAM-SYNX",                \
 __builtin_choose_expr(((module_id) == CAM_VMRM), "CAM-VMRM",                \
 __builtin_choose_expr(((module_id) == CAM_SENSOR_IO), "CAM-SENSOR-IO",      \
 __builtin_choose_expr(((module_id) == CAM_WORKER), "CAM-WORKER",            \
-"CAMERA"))))))))))))))))))))))))))))))))))))))))
+__builtin_choose_expr(((module_id) == CAM_ZOOM), "CAM-ZOOM",              \
+"CAMERA")))))))))))))))))))))))))))))))))))))))))
 
 #define CAM_DBG_MOD_NAME(module_id) \
 ((module_id < CAM_DBG_MOD_MAX) ? cam_debug_mod_name[module_id] : "CAMERA")
