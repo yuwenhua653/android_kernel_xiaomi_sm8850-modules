@@ -191,3 +191,18 @@ obj-m += wsa884x_dlkm.o
 wsa884x_dlkm-y := asoc/codecs/wsa884x/wsa884x.o \
 	asoc/codecs/wsa884x/wsa884x-regmap.o \
 	asoc/codecs/wsa884x/wsa884x-tables.o
+
+# TI's public TAS25xx codec, used by the Nezha board. The stock module does not
+# depend on the legacy QDSP6 AFE algorithm transport; do not enable that backend.
+ifeq ($(CONFIG_TARGET_PRODUCT_NEZHA),y)
+obj-m += tas25xx_dlkm.o
+tas25xx_dlkm-y := asoc/codecs/tas25xx/src/tas25xx-codec.o \
+ asoc/codecs/tas25xx/src/tas25xx-regmap.o \
+ asoc/codecs/tas25xx/src/tas25xx.o \
+ asoc/codecs/tas25xx/src/tas25xx-logic.o \
+ asoc/codecs/tas25xx/src/tas25xx-regbin-parser.o
+TAS25XX_CFLAGS := -I$(src)/asoc/codecs/tas25xx/inc \
+ -I$(src)/asoc/codecs/tas25xx -DCONFIG_TAS25XX_CODEC=1 \
+ -DCONFIG_SND_SOC_TAS25XX=1
+$(foreach obj,$(tas25xx_dlkm-y),$(eval CFLAGS_$(obj) += $(TAS25XX_CFLAGS)))
+endif

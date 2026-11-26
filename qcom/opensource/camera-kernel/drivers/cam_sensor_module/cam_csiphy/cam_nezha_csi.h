@@ -12,10 +12,12 @@ u8 cam_nezha_csi_choice(u32 phy, u8 choices);
 void cam_nezha_csi_crc(u32 phy);
 u32 cam_nezha_csi_crc_divisor(u32 fallback);
 bool cam_nezha_csi_full_recovery(void);
+bool cam_nezha_csi_error_policy(u32 *fatal, u32 *recoverable);
 #else
 static inline u8 cam_nezha_csi_choice(u32 phy, u8 choices) { return 0; }
 static inline void cam_nezha_csi_crc(u32 phy) { }
 static inline u32 cam_nezha_csi_crc_divisor(u32 fallback) { return fallback; }
 static inline bool cam_nezha_csi_full_recovery(void) { return false; }
+static inline bool cam_nezha_csi_error_policy(u32 *fatal, u32 *recoverable) { return false; }
 #endif
 #endif

@@ -17540,7 +17540,11 @@ static int cam_ife_hw_mgr_handle_csid_error(
 			ctx);
 	}
 
-	if (err_type & CAM_ISP_NON_RECOVERABLE_CSID_ERRORS) {
+	u32 fatal_types = CAM_ISP_NON_RECOVERABLE_CSID_ERRORS;
+	u32 recoverable_types = CAM_ISP_RECOVERABLE_CSID_ERRORS;
+
+	cam_nezha_csi_error_policy(&fatal_types, &recoverable_types);
+	if (err_type & fatal_types) {
 		recovery_data.error_type = err_type;
 		recoverable = false;
 	}
@@ -17558,7 +17562,7 @@ static int cam_ife_hw_mgr_handle_csid_error(
 		recoverable = false;
 
 	if (recoverable && (is_bus_overflow ||
-		(err_type & CAM_ISP_RECOVERABLE_CSID_ERRORS))) {
+		(err_type & recoverable_types))) {
 		if (ctx->try_recovery_cnt < MAX_INTERNAL_RECOVERY_ATTEMPTS) {
 			error_event_data.try_internal_recovery = true;
 

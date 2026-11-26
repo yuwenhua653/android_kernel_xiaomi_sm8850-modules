@@ -44,6 +44,17 @@ static int kstrtou64(const char *s,int base,u64 *value) {
  *value=n;return 0;
 }
 '''
+errors=(root/'drivers/cam_isp/isp_hw_mgr/include/cam_isp_hw_mgr_intf.h').read_text()
+pre += '\n'.join('#define '+name+' '+value for name,value in re.findall(r'(CAM_ISP_HW_ERROR_CSID_\w+)\s*=\s*(0x[0-9a-fA-F]+)',errors))+'\n'
+csid=(root/'drivers/cam_isp/isp_hw_mgr/isp_hw/ife_csid_hw/cam_ife_csid_hw_ver2.c').read_text()
+a=csid.index('static u32 cam_ife_csid_nezha_rx_masks');b=csid.index('static inline int cam_ife_csid_ver2_rx_err_process_top_half',a)
+helper=csid[a:b]
+# Keep event enum values from the actual hardware header.
+header=(root/'drivers/cam_isp/isp_hw_mgr/isp_hw/ife_csid_hw/cam_ife_csid_common.h').read_text()
+name='CAM_IFE_CSID_RX_ERROR_CRC';i=header.index(name);a=header.rfind('enum ',0,i);b=header.index('};',i)+2
+pre += header[a:b]+'\n#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))\n#define BIT(n) (1U<<(n))\n'
+body += helper
+
 test=r'''
 static ssize_t command(const char *s) { return csiphy_umd_paras_store(NULL,NULL,s,strlen(s)); }
 static void *worker(void *p) {
@@ -74,7 +85,27 @@ int main(void) {
  assert(command("0x1004,0")>0);
  assert(command("0x1003,0")>0);
  assert(command("0x1003,0x100000000")==-ERANGE);
- assert(command("0x1005,1")==-EOPNOTSUPP);
+ assert(command("0x1005,1")==-EINVAL);
+ assert(command("0x1005,0")==-EINVAL);
+ assert(command("0x1005,0x1000000010000")==-EINVAL); /* overlap */
+ u32 fatal=0x200,recover=0x10000;
+ assert(!cam_nezha_csi_error_policy(&fatal,&recover));
+ assert(command("0x1005,0x1000000000200")>0); /* CRC fatal, FIFO recoverable */
+ assert(cam_nezha_csi_error_policy(&fatal,&recover));
+ assert(fatal==0x10000 && recover==0x200);
+ u8 bits[64]={0};bits[CAM_IFE_CSID_RX_ERROR_CRC]=12;
+ bits[CAM_IFE_CSID_RX_LANE0_FIFO_OVERFLOW]=4;
+ u64 events=BIT_ULL(CAM_IFE_CSID_RX_ERROR_CRC) | (0xfULL<<CAM_IFE_CSID_RX_LANE0_FIFO_OVERFLOW);
+ fatal=0xf0;recover=0x1000;
+ assert(cam_ife_csid_nezha_rx_masks(events,bits,&fatal,&recover)==0xf0);
+ assert(fatal==0x1000 && recover==0xf0 && (fatal|recover)==0x10f0);
+ /* Unspecified event bits survive; absent/unsubscribed and bad positions do not change. */
+ fatal=0xf000;recover=0x20000;
+ cam_ife_csid_nezha_rx_masks(events,bits,&fatal,&recover);
+ assert(fatal==0xf000 && recover==0x20000);
+ fatal=0xf0;recover=0x1000;bits[CAM_IFE_CSID_RX_ERROR_CRC]=32;
+ cam_ife_csid_nezha_rx_masks(0,bits,&fatal,&recover);
+ assert(fatal==0xf0 && recover==0x1000);
  const char *bad[]={"", "0x1002", "0x1002,", "0x1002,1,0", "0x1002,-1", "0x1002,no", "0x1002,18446744073709551616"};
  for(unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);i++)assert(command(bad[i])<0);
  assert(csiphy_umd_paras_store(NULL,NULL,"0x1002,1\0bad",12)==-EINVAL);
@@ -85,7 +116,7 @@ int main(void) {
  for(int i=0;i<8;i++)assert(!pthread_join(threads[i],NULL));
  assert(csiphy_umd_paras_show(NULL,NULL,buf)==1 && !strcmp(buf,"0"));
  assert(!allocs);
- puts("PASS: parser/ranges, backup priority/clamp, retry wrap, invalid PHY, 8 concurrent PHYs x 10000 retries, allocation cleanup");
+ puts("PASS: parser/ranges, backup priority/clamp, retry wrap, invalid PHY, 8 concurrent PHYs x 10000 retries, allocation cleanup, CSID disjoint policy and IRQ-mask mapping");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='nezha-csi-test-') as t:

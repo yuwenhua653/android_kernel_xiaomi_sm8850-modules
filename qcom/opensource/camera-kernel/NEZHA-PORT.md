@@ -63,10 +63,15 @@ multi-camera switching was tested. Keep these as hardware acceptance items.
 
 The same official camera revision supplies the UMD command protocol and backup
 EQ settings. Nezha now registers `/sys/csiphy_umd_paras/csiphy_umd_paras` and
-implements commands 0x1000 through 0x1004: CRC divisor, CRC-event full recovery,
-AutoEQ enable, per-PHY retry state and backup selection. Command 0x1005 (dynamic
-CSID hardware error-mask overrides) explicitly returns EOPNOTSUPP until that
-separate path is implemented. Unknown commands and malformed values fail.
+implements commands 0x1000 through 0x1005: CRC divisor, CRC-event full recovery,
+AutoEQ enable, per-PHY retry state, backup selection and CSID error classification.
+Command 0x1005 uses the upper 32 bits for fatal errors and the lower 32 bits for
+recoverable errors. Zero, overlapping and unknown masks fail. Unlike a wholesale
+replacement, unspecified errors retain their existing classification. RX masks
+are local snapshots, preserve the subscribed IRQ union and map only events
+present in the selected hardware table. The manager applies the same policy to
+logical errors; this does not add new path IRQ sources. Unknown commands and
+malformed values fail.
 
 Changes relative to that source:
 
@@ -95,5 +100,9 @@ ASAN_OPTIONS=detect_leaks=0 python3 tools/test-nezha-csi.py
 ```
 
 These are host checks, not on-device AutoEQ/IRQ or HAL acceptance. Remaining:
-0x1005, the remaining OEM HAL/OIS/actuator contracts, and real probe/firmware,
+the remaining OEM HAL/OIS/actuator contracts, and real probe/firmware,
 zoom motion, streaming, reopen, multi-camera switching and suspend/resume.
+
+The host test also checks 0x1005 CRC/FIFO reclassification, overlapping/unknown
+masks, absent hardware events and unchanged IRQ subscription. Camera compilation
+is separate from real interrupt delivery, mixed-error recovery and HAL testing.

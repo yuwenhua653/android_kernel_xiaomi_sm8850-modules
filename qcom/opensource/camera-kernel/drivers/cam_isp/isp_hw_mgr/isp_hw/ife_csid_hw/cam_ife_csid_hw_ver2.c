@@ -1575,6 +1575,50 @@ static int cam_ife_csid_ver2_top2_err_top_half(
 	return rc;
 }
 
+/* Reclassify local masks, never mutate shared SoC register descriptors. */
+static u32 cam_ife_csid_nezha_rx_masks(u64 events, const u8 *bits,
+	u32 *fatal, u32 *partial)
+{
+	static const struct { u32 type; u8 event; u8 count; } mapping[] = {
+		{ CAM_ISP_HW_ERROR_CSID_PKT_PAYLOAD_CORRUPTED, CAM_IFE_CSID_RX_ERROR_CRC, 1 },
+		{ CAM_ISP_HW_ERROR_CSID_LANE_FIFO_OVERFLOW, CAM_IFE_CSID_RX_LANE0_FIFO_OVERFLOW, 4 },
+		{ CAM_ISP_HW_ERROR_CSID_PKT_HDR_CORRUPTED, CAM_IFE_CSID_RX_ERROR_CPHY_PH_CRC, 1 },
+		{ CAM_ISP_HW_ERROR_CSID_PKT_HDR_CORRUPTED, CAM_IFE_CSID_RX_ERROR_ECC, 1 },
+		{ CAM_ISP_HW_ERROR_CSID_MISSING_PKT_HDR_DATA, CAM_IFE_CSID_RX_STREAM_UNDERFLOW, 1 },
+		{ CAM_ISP_HW_ERROR_CSID_UNBOUNDED_FRAME, CAM_IFE_CSID_RX_UNBOUNDED_FRAME, 1 },
+		{ CAM_ISP_HW_ERROR_CSID_MISSING_SOT, CAM_IFE_CSID_RX_DL0_SOT_LOST, 4 },
+		{ CAM_ISP_HW_ERROR_CSID_MISSING_EOT, CAM_IFE_CSID_RX_DL0_EOT_LOST, 4 },
+	};
+	u32 f = 0, r = 0, decode_partial = 0, bit;
+	int i, lane;
+
+	if (!cam_nezha_csi_error_policy(&f, &r))
+		return 0;
+	for (i = 0; i < ARRAY_SIZE(mapping); i++) {
+		if (!(mapping[i].type & (f | r)))
+			continue;
+		for (lane = 0; lane < mapping[i].count; lane++) {
+			if (!(events & (BIT_ULL(mapping[i].event) << lane)) ||
+				bits[mapping[i].event] + lane >= 32)
+				continue;
+			bit = BIT(bits[mapping[i].event] + lane);
+			/* Keep the subscribed interrupt union unchanged. */
+			if (!((*fatal | *partial) & bit))
+				continue;
+			if (mapping[i].type & f) {
+				*fatal |= bit;
+				*partial &= ~bit;
+			} else {
+				*partial |= bit;
+				*fatal &= ~bit;
+				if (mapping[i].type != CAM_ISP_HW_ERROR_CSID_PKT_PAYLOAD_CORRUPTED)
+					decode_partial |= bit;
+			}
+		}
+	}
+	return decode_partial;
+}
+
 static inline int cam_ife_csid_ver2_rx_err_process_top_half(
 	struct cam_ife_csid_ver2_hw        *csid_hw,
 	uint32_t                           *evt_status_arr,
@@ -1582,6 +1626,7 @@ static inline int cam_ife_csid_ver2_rx_err_process_top_half(
 	uint32_t                           *status)
 {
 	int32_t                                          rc = 0;
+	u32 fatal_mask, partial_mask, extra_partial;
 	struct cam_ife_csid_ver2_reg_info               *csid_reg;
 	struct cam_ife_csid_ver2_csi2_rx_reg_info       *csi2_reg;
 	int                                              discard_frame_count;
@@ -1594,6 +1639,10 @@ static inline int cam_ife_csid_ver2_rx_err_process_top_half(
 
 	evt_bitmap = csid_reg->rx_debug_mask->evt_bitmap;
 	bit_pos = csid_reg->rx_debug_mask->bit_pos;
+	fatal_mask = csi2_reg->fatal_err_mask[rx_idx];
+	partial_mask = csi2_reg->part_fatal_err_mask[rx_idx];
+	extra_partial = cam_ife_csid_nezha_rx_masks(evt_bitmap[rx_idx], bit_pos,
+		&fatal_mask, &partial_mask);
 
 	discard_frame_count = atomic_read(&csid_hw->discard_frame_per_path);
 	if (discard_frame_count) {
@@ -1622,13 +1671,16 @@ static inline int cam_ife_csid_ver2_rx_err_process_top_half(
 		*status &= (~BIT(bit_pos[CAM_IFE_CSID_RX_CPHY_EOT_RECEPTION]));
 	}
 
-	if (*status & csi2_reg->fatal_err_mask[rx_idx]) {
+	if (*status & (fatal_mask | extra_partial)) {
+		if ((evt_bitmap[rx_idx] & BIT_ULL(CAM_IFE_CSID_RX_ERROR_CRC)) &&
+		    (*status & BIT(bit_pos[CAM_IFE_CSID_RX_ERROR_CRC])))
+			cam_nezha_csi_crc(csid_hw->rx_cfg.phy_sel - 1);
 		csid_hw->flags.fatal_err_detected = true;
 		cam_ife_csid_ver2_stop_csi2_in_err(csid_hw);
 		return rc;
 	}
 
-	if (*status & csi2_reg->part_fatal_err_mask[rx_idx]) {
+	if (*status & partial_mask) {
 		if ((evt_bitmap[rx_idx] & BIT_ULL(CAM_IFE_CSID_RX_CPHY_SOT_RECEPTION)) &&
 			(*status & BIT(bit_pos[CAM_IFE_CSID_RX_CPHY_SOT_RECEPTION]))) {
 			csid_hw->counters.error_irq_count++;
@@ -2125,6 +2177,7 @@ static int cam_ife_csid_ver2_rx_err_process_bottom_half(
 	struct cam_ife_csid_ver2_csi2_rx_reg_info       *csi2_reg = NULL;
 	struct cam_ife_csid_ver2_reg_info               *csid_reg = NULL;
 	uint32_t                                         irq_status = 0;
+	u32 fatal_mask, partial_mask, extra_partial;
 	struct cam_hw_soc_info                          *soc_info = NULL;
 	uint8_t                                         *log_buf = NULL;
 	uint32_t                                         rx_irq_status = 0;
@@ -2149,7 +2202,12 @@ static int cam_ife_csid_ver2_rx_err_process_bottom_half(
 
 	bit_pos = csid_reg->rx_debug_mask->bit_pos;
 
-	irq_status = irq_reg_val & csi2_reg->fatal_err_mask[rx_idx];
+	fatal_mask = csi2_reg->fatal_err_mask[rx_idx];
+	partial_mask = csi2_reg->part_fatal_err_mask[rx_idx];
+	extra_partial = cam_ife_csid_nezha_rx_masks(evt_bitmap[rx_idx], bit_pos,
+		&fatal_mask, &partial_mask);
+	/* Decode moved lane/header errors through the existing full decoder. */
+	irq_status = irq_reg_val & (fatal_mask | extra_partial);
 
 	log_buf = csid_hw->log_buf;
 	log_buf[0] = '\0';
@@ -2373,8 +2431,7 @@ static int cam_ife_csid_ver2_rx_err_process_bottom_half(
 		cam_ife_csid_ver2_send_cdr_sweep_csi2_rx_vals(csid_hw, csid_reg, irq_reg_val);
 	}
 
-	irq_status = irq_reg_val &
-			csi2_reg->part_fatal_err_mask[rx_idx];
+	irq_status = irq_reg_val & (partial_mask & ~extra_partial);
 
 	if (irq_status) {
 		len = 0;

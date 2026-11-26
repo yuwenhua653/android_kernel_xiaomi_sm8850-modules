@@ -8,6 +8,7 @@
 #include <linux/spinlock.h>
 #include <linux/sysfs.h>
 #include "cam_nezha_csi.h"
+#include "cam_isp_hw_mgr_intf.h"
 
 #define NEZHA_PHY_COUNT 8
 #define CSI_CRC_DIVISOR 0x1000
@@ -25,6 +26,16 @@ static u32 crc_divisor;
 static u32 backup_eq;
 static bool auto_eq;
 static bool full_recovery;
+static u64 error_policy;
+
+#define NEZHA_CSID_ERROR_BITS (CAM_ISP_HW_ERROR_CSID_FATAL | \
+ CAM_ISP_HW_ERROR_CSID_OUTPUT_FIFO_OVERFLOW | CAM_ISP_HW_ERROR_CSID_FRAME_SIZE | \
+ CAM_ISP_HW_ERROR_CSID_LANE_FIFO_OVERFLOW | CAM_ISP_HW_ERROR_CSID_PKT_HDR_CORRUPTED | \
+ CAM_ISP_HW_ERROR_CSID_MISSING_PKT_HDR_DATA | CAM_ISP_HW_ERROR_CSID_SENSOR_SWITCH_ERROR | \
+ CAM_ISP_HW_ERROR_CSID_UNBOUNDED_FRAME | CAM_ISP_HW_ERROR_CSID_SENSOR_FRAME_DROP | \
+ CAM_ISP_HW_ERROR_CSID_MISSING_EOT | CAM_ISP_HW_ERROR_CSID_PKT_PAYLOAD_CORRUPTED | \
+ CAM_ISP_HW_ERROR_CSID_CAMIF_FRAME_DROP | CAM_ISP_HW_ERROR_CSID_MISSING_SOT | \
+ CAM_ISP_HW_ERROR_CSID_ILLEGAL_DT_SWITCH | CAM_ISP_HW_ERROR_CSID_RUP_MISS)
 
 u8 cam_nezha_csi_choice(u32 phy, u8 choices)
 {
@@ -72,6 +83,25 @@ bool cam_nezha_csi_full_recovery(void)
 	return READ_ONCE(full_recovery);
 }
 
+/* Apply one coherent UMD snapshot. Unspecified errors keep their defaults. */
+bool cam_nezha_csi_error_policy(u32 *fatal, u32 *recoverable)
+{
+	unsigned long flags;
+	u64 policy;
+	u32 f, r;
+
+	spin_lock_irqsave(&csi_lock, flags);
+	policy = error_policy;
+	spin_unlock_irqrestore(&csi_lock, flags);
+	if (!policy)
+		return false;
+	f = policy >> 32;
+	r = policy;
+	*fatal = (*fatal & ~r) | f;
+	*recoverable = (*recoverable & ~f) | r;
+	return true;
+}
+
 static int cam_nezha_csi_command(u64 cmd, u64 value)
 {
 	unsigned long flags;
@@ -109,8 +139,11 @@ static int cam_nezha_csi_command(u64 cmd, u64 value)
 			backup_eq = value;
 		break;
 	case CSI_ERROR_MASKS:
-		/* Dynamic hardware IRQ-mask overrides need a separate CSID port. */
-		rc = -EOPNOTSUPP;
+		if (!value || ((u32)value & (u32)(value >> 32)) ||
+		    (((u32)value | (u32)(value >> 32)) & ~NEZHA_CSID_ERROR_BITS))
+			rc = -EINVAL;
+		else
+			error_policy = value;
 		break;
 	default:
 		rc = -EINVAL;

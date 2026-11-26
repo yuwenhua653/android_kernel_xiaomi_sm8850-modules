@@ -1689,6 +1689,59 @@ put_node:
 	return ret;
 }
 
+/* OS4.0.7 machine_dlkm binds both primary TDM directions to TAS25xx ASI1.
+ * Resolve the board node instead of assuming Linux I2C adapter number 13. */
+static int nezha_tas25xx_configure_links(struct snd_soc_card *card)
+{
+	struct snd_soc_dai_link *rx = NULL, *tx = NULL;
+	struct snd_soc_dai_link_component *codec;
+	struct device_node *node, *amp = NULL;
+	int i, ret;
+
+	if (!IS_ENABLED(CONFIG_TARGET_PRODUCT_NEZHA))
+		return 0;
+	for_each_compatible_node(node, NULL, "ti,tas25xx") {
+		if (!of_device_is_available(node))
+			continue;
+		if (amp) {
+			of_node_put(amp);
+			of_node_put(node);
+			return -EINVAL;
+		}
+		amp = of_node_get(node);
+	}
+	/* Other Nezha board variants may use a different amplifier. */
+	if (!amp)
+		return 0;
+	ret = devm_add_action_or_reset(card->dev, myron_tfa_put_node, amp);
+	if (ret)
+		return ret;
+	for (i = 0; i < card->num_links; i++) {
+		if (!strcmp(card->dai_link[i].name, LPASS_BE_PRI_TDM_RX_0)) {
+			if (rx)
+				return -EINVAL;
+			rx = &card->dai_link[i];
+		}
+		if (!strcmp(card->dai_link[i].name, LPASS_BE_PRI_TDM_TX_0)) {
+			if (tx)
+				return -EINVAL;
+			tx = &card->dai_link[i];
+		}
+	}
+	if (!rx || !tx)
+		return -EINVAL;
+	codec = devm_kzalloc(card->dev, sizeof(*codec), GFP_KERNEL);
+	if (!codec)
+		return -ENOMEM;
+	codec->of_node = amp;
+	codec->dai_name = "tas25xx ASI1";
+	rx->codecs = codec;
+	rx->num_codecs = 1;
+	tx->codecs = codec;
+	tx->num_codecs = 1;
+	return 0;
+}
+
 static int msm_populate_dai_link_component_of_node(
 					struct snd_soc_card *card)
 {
@@ -2904,6 +2957,10 @@ static int msm_asoc_machine_probe(struct platform_device *pdev)
 	}
 
 	ret = myron_tfa_configure_links(card);
+	if (ret)
+		goto err;
+
+	ret = nezha_tas25xx_configure_links(card);
 	if (ret)
 		goto err;
 
