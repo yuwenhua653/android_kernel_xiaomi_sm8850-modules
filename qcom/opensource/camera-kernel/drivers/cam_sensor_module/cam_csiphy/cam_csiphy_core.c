@@ -10,6 +10,7 @@
 
 #include "cam_compat.h"
 #include "cam_csiphy_core.h"
+#include "cam_nezha_csi.h"
 #include "cam_csiphy_dev.h"
 #include "cam_csiphy_soc.h"
 #include "cam_common_util.h"
@@ -1623,7 +1624,7 @@ static void cam_csiphy_program_cphy_common_ctrl_settings(
 }
 
 static int cam_csiphy_cphy_data_rate_config(struct csiphy_device *csiphy_device,
-	int32_t idx, uint16_t lane_idx, uint8_t datarate_variant_idx)
+	int32_t idx, uint16_t lane_idx, uint8_t datarate_variant_idx, u8 *eq_choice)
 {
 	int i, j = 0, rc = 0;
 	unsigned int data_rate_idx;
@@ -1683,6 +1684,14 @@ static int cam_csiphy_cphy_data_rate_config(struct csiphy_device *csiphy_device,
 				"Skipping table [%d] with BW: %llu, Required data_rate: %llu",
 				data_rate_idx, supported_phy_bw, required_phy_data_rate);
 			continue;
+		}
+
+		if (drate_settings[data_rate_idx].this_setting_max_choice) {
+			if (*eq_choice == U8_MAX)
+				*eq_choice = cam_nezha_csi_choice(csiphy_index,
+					drate_settings[data_rate_idx].this_setting_max_choice);
+			if (*eq_choice != drate_settings[data_rate_idx].this_setting_current_choice)
+				continue;
 		}
 
 		CAM_DBG(CAM_CSIPHY, "table[%d] BW : %llu Selected",
@@ -2068,6 +2077,7 @@ int32_t cam_csiphy_config_dev(struct csiphy_device *csiphy_dev,
 	uint32_t      lane_idx;
 	uint16_t      settle_cnt = 0, lane_assign;
 	uint8_t       skew_cal_enable = 0, lane_cnt;
+	u8            eq_choice = U8_MAX;
 	void __iomem *csiphybase;
 	bool          is_3phase = false;
 	struct csiphy_lane_settings_param lane_settings;
@@ -2126,7 +2136,7 @@ int32_t cam_csiphy_config_dev(struct csiphy_device *csiphy_dev,
 
 		if (csiphy_dev->csiphy_info[index].csiphy_3phase) {
 			rc = cam_csiphy_cphy_data_rate_config(csiphy_dev, index,
-					(uint16_t)lane_idx, datarate_variant_idx);
+					(uint16_t)lane_idx, datarate_variant_idx, &eq_choice);
 			if (rc) {
 				CAM_ERR(CAM_CSIPHY,
 					"Date rate specific configuration failed rc: %d",

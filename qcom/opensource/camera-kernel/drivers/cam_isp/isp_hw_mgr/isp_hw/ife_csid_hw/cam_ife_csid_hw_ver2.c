@@ -4,6 +4,7 @@
  * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
+#include "cam_nezha_csi.h"
 #include <linux/iopoll.h>
 #include <linux/slab.h>
 #include <media/cam_isp.h>
@@ -1639,6 +1640,8 @@ static inline int cam_ife_csid_ver2_rx_err_process_top_half(
 		if ((evt_bitmap[rx_idx] & BIT_ULL(CAM_IFE_CSID_RX_ERROR_CRC)) &&
 			(*status & BIT(bit_pos[CAM_IFE_CSID_RX_ERROR_CRC]))) {
 			csid_hw->counters.crc_error_irq_count++;
+			if (csid_hw->counters.crc_error_irq_count > csid_hw->crc_error_threshold)
+				cam_nezha_csi_crc(csid_hw->rx_cfg.phy_sel - 1);
 			if (csid_hw->counters.crc_error_irq_count > csid_hw->crc_error_threshold)
 				CAM_DBG(CAM_ISP,
 					"CSID[%u] Recoverable CRC Error Count: %u, CRC Error threshold: %u",
@@ -5674,7 +5677,7 @@ static int cam_ife_csid_ver2_program_rdi_path(
 	/* Set crc error threshold for primary rdi path */
 	if (res->is_rdi_primary_res)
 		csid_hw->crc_error_threshold = path_data->path_cfg.height /
-			CAM_IFE_CSID_MAX_CRC_ERR_DIVISOR;
+			cam_nezha_csi_crc_divisor(CAM_IFE_CSID_MAX_CRC_ERR_DIVISOR);
 
 	if (!csid_hw->flags.offline_mode && !(csid_reg->cmn_reg->capabilities &
 		CAM_IFE_CSID_CAP_SKIP_EPOCH_CFG)) {
@@ -5790,7 +5793,7 @@ static int cam_ife_csid_ver2_program_ipp_path(
 	/* Set crc error threshold for ipp path */
 	if (res->res_id == CAM_IFE_PIX_PATH_RES_IPP)
 		csid_hw->crc_error_threshold = path_data->path_cfg.height /
-			CAM_IFE_CSID_MAX_CRC_ERR_DIVISOR;
+			cam_nezha_csi_crc_divisor(CAM_IFE_CSID_MAX_CRC_ERR_DIVISOR);
 
 	if (!(csid_reg->cmn_reg->capabilities & CAM_IFE_CSID_CAP_SKIP_EPOCH_CFG)) {
 		cam_io_w_mb(path_data->path_cfg.epoch_cfg <<

@@ -59,11 +59,41 @@ This is not a full kernel build or modpost/signature/CRC qualification. No real
 firmware update, camera probe, optical motion, image streaming, reopen or
 multi-camera switching was tested. Keep these as hardware acceptance items.
 
-## Remaining official-source work
+## CSI AutoEQ / CRC recovery integration (2026-11-26)
 
-- CSI PHY AutoEQ/backup-EQ requires the HAL sysfs/control interface and CSID
-  error reporting to be ported together. Keep the existing stock-verified
-  default -1 tables until that path is reviewed. The new upstream backup table
-  also writes a common register; it is not a drop-in default table replacement.
-- Audit the remaining OEM camera commands (including OIS/actuator behavior)
-  against the OS4.0.7 HAL ABI rather than replacing the entire newer UAPI file.
+The same official camera revision supplies the UMD command protocol and backup
+EQ settings. Nezha now registers `/sys/csiphy_umd_paras/csiphy_umd_paras` and
+implements commands 0x1000 through 0x1004: CRC divisor, CRC-event full recovery,
+AutoEQ enable, per-PHY retry state and backup selection. Command 0x1005 (dynamic
+CSID hardware error-mask overrides) explicitly returns EOPNOTSUPP until that
+separate path is implemented. Unknown commands and malformed values fail.
+
+Changes relative to that source:
+
+- Serialize sysfs/IRQ updates with a spinlock, validate all PHY indices and
+  command ranges, and unwind failed sysfs creation. No writable module globals.
+- Choose EQ once per PHY configuration, then apply the same choice to every
+  lane. CRC retry markers cannot change the choice halfway through the lanes.
+- Associate forced full recovery with the current CSID CRC event, avoiding a
+  shared sticky flag that could affect another camera's unrelated error.
+- Retain all 29 OS4.0.7 default rates. The 3.0 Gsps backup uses the 12-register
+  OS4.0.7 table; omit the later songyuan common write at 0x108c, whose addition
+  is not supported by the matching factory table. Do not substitute a new
+  kernel's register programming merely because it has the same device name.
+- Compile/register the sysfs provider only for CONFIG_TARGET_PRODUCT_NEZHA.
+  Other products select default choice zero and retain their CRC fallback.
+
+Validation: complete ARM64 camera.o compilation/link passed. The actual compiled
+ELF matches the factory's 29 baseline rates, PHY/variant references, nine
+register arrays (including backup EQ), and lane offsets. The host test extracts
+the actual CSI source and passes ASan/UBSan for parsing/ranges, allocation and
+initialization cleanup, backup priority/clamping, retry wrap, invalid PHY and
+eight concurrent PHYs with 10,000 CRC/retry iterations each:
+
+```sh
+ASAN_OPTIONS=detect_leaks=0 python3 tools/test-nezha-csi.py
+```
+
+These are host checks, not on-device AutoEQ/IRQ or HAL acceptance. Remaining:
+0x1005, the remaining OEM HAL/OIS/actuator contracts, and real probe/firmware,
+zoom motion, streaming, reopen, multi-camera switching and suspend/resume.

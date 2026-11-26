@@ -264,6 +264,8 @@ struct csiphy_device;
  * @data_rate_reg_array        : array of data rate specific reg value pairs
  */
 struct data_rate_reg_info_t {
+	uint8_t this_setting_max_choice;
+	uint8_t this_setting_current_choice;
 	uint64_t bandwidth;
 	ssize_t  data_rate_reg_array_size;
 	ssize_t  common_ctrl_reg_array_size;

@@ -4,6 +4,7 @@
  * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
+#include "cam_nezha_csi.h"
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
@@ -17540,6 +17541,13 @@ static int cam_ife_hw_mgr_handle_csid_error(
 	}
 
 	if (err_type & CAM_ISP_NON_RECOVERABLE_CSID_ERRORS) {
+		recovery_data.error_type = err_type;
+		recoverable = false;
+	}
+
+	/* Scope forced CRC recovery to this event, never another camera. */
+	if (cam_nezha_csi_full_recovery() &&
+		(err_type & CAM_ISP_HW_ERROR_CSID_PKT_PAYLOAD_CORRUPTED)) {
 		recovery_data.error_type = err_type;
 		recoverable = false;
 	}

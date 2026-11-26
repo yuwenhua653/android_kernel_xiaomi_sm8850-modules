@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* Nezha OS4.0.7 CSI PHY v2.4.0-1 baseline register settings.
  * Include after cam_csiphy_2_4_0_hwreg.h for the shared V240 tables.
- * Matches factory AutoEQ choice zero; OEM retry control is not implemented.
+ * Default settings match OS4.0.7; backup EQ is from MiCode songyuan-w-oss.
  */
 #ifndef _CAM_CSIPHY_2_4_0_1_HWREG_H_
 #define _CAM_CSIPHY_2_4_0_1_HWREG_H_
@@ -59,6 +59,24 @@ static struct csiphy_reg_t datarate_240_4p0Gsps_1[] = {
 	{0x0008, 0x0000, 0x0000, 0x0008},
 	{0x0010, 0x0000, 0x0000, 0x0001},
 	{0x0014, 0x0000, 0x0000, 0x0001},
+};
+
+struct csiphy_reg_t datarate_240_3p0Gsps_1_bp[] = {
+	/* AFE Settings */
+	{0x0068, 0xF1, 0x00, CSIPHY_DEFAULT_PARAMS},
+	{0x006C, 0x07, 0x00, CSIPHY_DEFAULT_PARAMS},
+	{0x0070, 0x03, 0x00, CSIPHY_DEFAULT_PARAMS},
+	{0x0074, 0x03, 0x00, CSIPHY_DEFAULT_PARAMS},
+	{0x0078, 0x1C, 0x00, CSIPHY_CDR_LN_SETTINGS},
+	{0x0088, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+	{0x008C, 0x70, 0x00, CSIPHY_DEFAULT_PARAMS},
+	{0x0090, 0x02, 0x00, CSIPHY_DEFAULT_PARAMS},
+	/* Datarate Sensitive */
+	{0x000C, 0x20, 0x00, CSIPHY_SETTLE_CNT_LOWER_BYTE},
+	{0x0008, 0x00, 0x00, CSIPHY_SETTLE_CNT_HIGHER_BYTE},
+	{0x0010, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+	{0x0014, 0x00, 0x00, CSIPHY_DEFAULT_PARAMS},
+	/* OS4.0.7 uses these 12 entries; omit the later W common write. */
 };
 
 static struct data_rate_reg_info_t data_rate_settings_2_4_0_1[] = {
@@ -316,6 +334,8 @@ static struct data_rate_reg_info_t data_rate_settings_2_4_0_1[] = {
 	},
 	{
 		.bandwidth = 6840000000ULL,
+		.this_setting_max_choice = 2,
+		.this_setting_current_choice = 0,
 		.data_rate_reg_array_size = 12,
 		.data_rate_reg_array[0][0] = datarate_240_3p0Gsps_1,
 		.data_rate_reg_array[1][0] = datarate_240_3p0Gsps_1,
@@ -325,6 +345,21 @@ static struct data_rate_reg_info_t data_rate_settings_2_4_0_1[] = {
 		.data_rate_reg_array[5][0] = datarate_240_3p0Gsps_1,
 		.data_rate_reg_array[6][0] = datarate_240_3p0Gsps_1,
 		.data_rate_reg_array[7][0] = datarate_240_3p0Gsps_1,
+	},
+
+	{
+		.bandwidth = 6840000000ULL,
+		.this_setting_max_choice = 2,
+		.this_setting_current_choice = 1,
+		.data_rate_reg_array_size = ARRAY_SIZE(datarate_240_3p0Gsps_1_bp),
+		.data_rate_reg_array[0][0] = datarate_240_3p0Gsps_1_bp,
+		.data_rate_reg_array[1][0] = datarate_240_3p0Gsps_1_bp,
+		.data_rate_reg_array[2][0] = datarate_240_3p0Gsps_1_bp,
+		.data_rate_reg_array[3][0] = datarate_240_3p0Gsps_1_bp,
+		.data_rate_reg_array[4][0] = datarate_240_3p0Gsps_1_bp,
+		.data_rate_reg_array[5][0] = datarate_240_3p0Gsps_1_bp,
+		.data_rate_reg_array[6][0] = datarate_240_3p0Gsps_1_bp,
+		.data_rate_reg_array[7][0] = datarate_240_3p0Gsps_1_bp,
 	},
 	{
 		.bandwidth = 7524000000ULL,

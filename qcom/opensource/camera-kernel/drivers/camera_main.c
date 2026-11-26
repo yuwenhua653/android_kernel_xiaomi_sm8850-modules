@@ -26,6 +26,7 @@
 #include "cam_actuator_dev.h"
 #ifdef CONFIG_TARGET_PRODUCT_NEZHA
 #include "cam_zoom_dev.h"
+#include "cam_nezha_csi.h"
 #endif
 #include "cam_csiphy_dev.h"
 #include "cam_eeprom_dev.h"
@@ -122,6 +123,9 @@ static const struct camera_submodule_component camera_isp[] = {
 
 static const struct camera_submodule_component camera_sensor[] = {
 #ifdef CONFIG_SPECTRA_SENSOR
+#ifdef CONFIG_TARGET_PRODUCT_NEZHA
+	{&cam_nezha_csi_init, &cam_nezha_csi_exit},
+#endif
 	{&cam_res_mgr_init, &cam_res_mgr_exit},
 	{&cam_cci_init_module, &cam_cci_exit_module},
 	{&cam_csiphy_init_module, &cam_csiphy_exit_module},
