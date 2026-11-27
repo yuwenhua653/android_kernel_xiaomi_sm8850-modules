@@ -1328,6 +1328,15 @@ struct cam_flash_query_curr {
 	__u16    reserved1;
 } __attribute__ ((packed));
 
+/* Songyuan / OS4 Nezha ABI. Keep the generic 12-byte ABI unchanged. */
+struct cam_flash_query_curr_nezha {
+	__u16 reserved;
+	__u8 opcode;
+	__u8 cmd_type;
+	__u32 query_current_ma;
+} __attribute__((packed));
+
+
 /**
  * struct cam_flash_query_cap  :  capabilities info for flash
  *

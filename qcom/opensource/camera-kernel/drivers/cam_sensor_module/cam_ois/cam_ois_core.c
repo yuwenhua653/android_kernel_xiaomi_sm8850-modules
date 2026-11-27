@@ -705,8 +705,8 @@ static int cam_ois_fw_info_pkt_parser(struct cam_ois_ctrl_t *o_ctrl,
 				goto release;
 			}
 
-			pSettingData += version_size;
 		}
+		pSettingData += version_size;
 
 		o_ctrl->i2c_fw_init_data     = CAM_MEM_ZALLOC(sizeof(struct i2c_settings_array) * ois_fw_info->fw_count, GFP_KERNEL);
 		o_ctrl->i2c_fw_finalize_data = CAM_MEM_ZALLOC(sizeof(struct i2c_settings_array) * ois_fw_info->fw_count, GFP_KERNEL);
@@ -777,37 +777,34 @@ release:
 
 int cam_ois_fw_info_input_check(uint32_t *cmd_buf, size_t len)
 {
-	int32_t     rc           = 0;
-	uint32_t    version_size = 0;
-	size_t      cmdsize      = 0;
-	uint8_t     count        = 0;
-	struct cam_cmd_ois_fw_info_v2  *ois_fw_info;
+	struct cam_cmd_ois_fw_info_v2 *info = (void *)cmd_buf;
+	size_t remaining, table_size;
+	unsigned int i;
 
-	ois_fw_info  = (struct cam_cmd_ois_fw_info_v2 *)cmd_buf;
-	if ((ois_fw_info->param_mask & CAM_OIS_FW_VERSION_CHECK_MASK) == 0x1) {
-		version_size = ois_fw_info->params[0];
-		CAM_DBG(CAM_OIS, "versionSize: %d", version_size);
+	if (!info || len < sizeof(*info))
+		return -EINVAL;
+	if (!info->fw_count)
+		return -EINVAL;
+	remaining = len - sizeof(*info);
+	table_size = sizeof(struct cam_cmd_ois_fw_param) * info->fw_count;
+	/* Validate the entire parameter table BEFORE dereferencing its entries. */
+	if (table_size > remaining)
+		return -EINVAL;
+	remaining -= table_size;
+	if (info->param_mask & CAM_OIS_FW_VERSION_CHECK_MASK) {
+		if (info->params[0] > remaining)
+			return -EINVAL;
+		remaining -= info->params[0];
 	}
-
-	cmdsize += sizeof(struct cam_cmd_ois_fw_info_v2);
-	cmdsize += sizeof(struct cam_cmd_ois_fw_param) * ois_fw_info->fw_count;
-	cmdsize += version_size;
-	for (count = 0; count < ois_fw_info->fw_count; count++){
-		if (ois_fw_info->fw_param[count].fw_init_size > 0){
-			cmdsize += ois_fw_info->fw_param[count].fw_init_size;
-			CAM_DBG(CAM_OIS, "count:%d, fw init size:%d", count, ois_fw_info->fw_param[count].fw_init_size);
-		}
-		if (ois_fw_info->fw_param[count].fw_finalize_size > 0){
-			cmdsize += ois_fw_info->fw_param[count].fw_finalize_size;
-			CAM_DBG(CAM_OIS, "count:%d, fw finalize size:%d", count, ois_fw_info->fw_param[count].fw_finalize_size);
-		}
+	for (i = 0; i < info->fw_count; i++) {
+		if (info->fw_param[i].fw_init_size > remaining)
+			return -EINVAL;
+		remaining -= info->fw_param[i].fw_init_size;
+		if (info->fw_param[i].fw_finalize_size > remaining)
+			return -EINVAL;
+		remaining -= info->fw_param[i].fw_finalize_size;
 	}
-	if (cmdsize != len){
-		CAM_ERR(CAM_OIS, "cmd size validate error! cmdsize:%d, expect:%d", cmdsize, len);
-		rc = -EINVAL;
-	}
-
-	return rc;
+	return remaining ? -EINVAL : 0;
 }
 
 static int cam_ois_fw_info_pkt_parser_v2(struct cam_ois_ctrl_t *o_ctrl,
@@ -863,8 +860,8 @@ static int cam_ois_fw_info_pkt_parser_v2(struct cam_ois_ctrl_t *o_ctrl,
 				CAM_ERR(CAM_OIS, "Failed to parse fw version settings");
 				goto release;
 			}
-			pSettingData += version_size;
 		}
+		pSettingData += version_size;
 
 		o_ctrl->i2c_fw_init_data     = CAM_MEM_ZALLOC(sizeof(struct i2c_settings_array) * ois_fw_info->fw_count, GFP_KERNEL);
 		o_ctrl->i2c_fw_finalize_data = CAM_MEM_ZALLOC(sizeof(struct i2c_settings_array) * ois_fw_info->fw_count, GFP_KERNEL);
@@ -1048,82 +1045,86 @@ release_firmware:
 	return rc;
 }
 
+static int cam_ois_validate_fw_param(const struct cam_cmd_ois_fw_param *param)
+{
+	uint32_t words;
+
+	if (!param || !memchr(param->fw_name, '\0', sizeof(param->fw_name)) ||
+	    !param->fw_name[0] || !param->fw_size)
+		return -EINVAL;
+	if (param->fw_data_type != CAMERA_SENSOR_I2C_TYPE_BYTE &&
+	    param->fw_data_type != CAMERA_SENSOR_I2C_TYPE_WORD)
+		return -EINVAL;
+	if (!param->fw_len_per_write ||
+	    param->fw_len_per_write % param->fw_data_type ||
+	    param->fw_size % param->fw_data_type)
+		return -EINVAL;
+	words = param->fw_len_per_write / param->fw_data_type;
+	if (words > 0xffff)
+		return -EINVAL;
+	if (param->fw_operation != CAMERA_SENSOR_I2C_OP_RNDM_WR &&
+	    param->fw_operation != CAMERA_SENSOR_I2C_OP_CONT_WR_BRST &&
+	    param->fw_operation != CAMERA_SENSOR_I2C_OP_CONT_WR_SEQN)
+		return -EINVAL;
+	/* Every register address below uses fw_reg_addr + word offset. */
+	if (param->fw_size / param->fw_data_type - 1 >
+	    (uint32_t)~0U - param->fw_reg_addr)
+		return -EINVAL;
+	return 0;
+}
+
 static int write_ois_fw(uint8_t *fw_data, enum cam_endianness_type endianness,
 	struct cam_cmd_ois_fw_param *fw_param, struct camera_io_master io_master_info,
 	uint8_t i2c_operation)
 {
-	int32_t                             rc = 0;
-	struct cam_sensor_i2c_reg_setting   setting;
-	uint8_t                            *ptr = fw_data;
-	int32_t                             cnt = 0, wcnt = 0;
-	void                               *vaddr = NULL;
-	uint16_t                            data_type = fw_param->fw_data_type;
-	uint16_t                            len_per_write = fw_param->fw_len_per_write /
-								fw_param->fw_data_type;
+	struct cam_sensor_i2c_reg_setting setting = {0};
+	uint32_t total, batch, offset, i, words;
+	uint16_t data_type;
+	int rc;
 
-	vaddr = vmalloc((sizeof(struct cam_sensor_i2c_reg_array) * len_per_write));
-	if (!vaddr) {
-		CAM_ERR(CAM_OIS,
-			"Failed in allocating i2c_array: size: %u",
-			(sizeof(struct cam_sensor_i2c_reg_array) * len_per_write));
+	rc = cam_ois_validate_fw_param(fw_param);
+	if (rc || !fw_data)
+		return -EINVAL;
+	if (endianness != CAM_ENDIANNESS_BIG && endianness != CAM_ENDIANNESS_LITTLE)
+		return -EINVAL;
+	if (i2c_operation != CAM_SENSOR_I2C_WRITE_RANDOM &&
+	    i2c_operation != CAM_SENSOR_I2C_WRITE_BURST &&
+	    i2c_operation != CAM_SENSOR_I2C_WRITE_SEQ)
+		return -EINVAL;
+	data_type = fw_param->fw_data_type;
+	total = fw_param->fw_size / data_type;
+	batch = fw_param->fw_len_per_write / data_type;
+	setting.reg_setting = vmalloc(sizeof(*setting.reg_setting) * batch);
+	if (!setting.reg_setting)
 		return -ENOMEM;
-	}
+	setting.addr_type = fw_param->fw_addr_type;
+	setting.data_type = data_type;
+	setting.delay = fw_param->fw_delayUs;
+	for (offset = 0; offset < total; offset += words) {
+		words = min(batch, total - offset);
+		setting.size = words;
+		for (i = 0; i < words; i++) {
+			const uint8_t *ptr = fw_data + (offset + i) * data_type;
+			uint32_t value = ptr[0];
 
-	setting.reg_setting = (struct cam_sensor_i2c_reg_array *) (vaddr);
-	setting.addr_type   = fw_param->fw_addr_type;
-	setting.data_type   = fw_param->fw_data_type;
-	setting.size        = len_per_write;
-	setting.delay       = fw_param->fw_delayUs;
-
-	for (wcnt = 0; wcnt < (fw_param->fw_size/data_type); wcnt += len_per_write) {
-		for (cnt = 0; cnt < len_per_write; cnt++, ptr += data_type) {
-			setting.reg_setting[cnt].reg_addr =
-				fw_param->fw_reg_addr + wcnt + cnt;
-			/* Big */
-			if (endianness == CAM_ENDIANNESS_BIG) {
-				setting.reg_setting[cnt].reg_data =
-					(uint32_t)swap_high_byte_and_low_byte(ptr, data_type);
-			/* Little */
-			} else if (endianness == CAM_ENDIANNESS_LITTLE) {
-				switch (data_type) {
-				case CAMERA_SENSOR_I2C_TYPE_BYTE:
-					setting.reg_setting[cnt].reg_data = *((uint8_t *)ptr);
-					break;
-				case CAMERA_SENSOR_I2C_TYPE_WORD:
-					setting.reg_setting[cnt].reg_data = *((uint16_t *)ptr);
-					break;
-				default:
-					CAM_ERR(CAM_OIS,
-						"Unsupported data type");
-					rc = -EINVAL;
-					goto End;
-				}
-			}
-
-			setting.reg_setting[cnt].delay = fw_param->fw_delayUs;
-			setting.reg_setting[cnt].data_mask = 0;
+			if (data_type == CAMERA_SENSOR_I2C_TYPE_WORD)
+				value = endianness == CAM_ENDIANNESS_BIG ?
+					((uint32_t)ptr[0] << 8) | ptr[1] :
+					((uint32_t)ptr[1] << 8) | ptr[0];
+			setting.reg_setting[i].reg_addr = fw_param->fw_reg_addr + offset + i;
+			setting.reg_setting[i].reg_data = value;
+			setting.reg_setting[i].delay = fw_param->fw_delayUs;
+			setting.reg_setting[i].data_mask = 0;
 		}
-
-		if (i2c_operation == CAM_SENSOR_I2C_WRITE_RANDOM) {
-			rc = camera_io_dev_write(&(io_master_info),
-				&setting);
-		} else if (i2c_operation == CAM_SENSOR_I2C_WRITE_BURST ||
-			i2c_operation == CAM_SENSOR_I2C_WRITE_SEQ) {
+		if (i2c_operation == CAM_SENSOR_I2C_WRITE_RANDOM)
+			rc = camera_io_dev_write(&io_master_info, &setting);
+		else
 			rc = camera_io_dev_write_continuous(&io_master_info,
 				&setting, i2c_operation);
-		}
-
-		if (rc < 0) {
-			CAM_ERR(CAM_OIS,
-				"Failed in Applying i2c wrt settings");
+		if (rc)
 			break;
-		}
 	}
-
-End:
-	vfree(vaddr);
-	vaddr = NULL;
-
+	vfree(setting.reg_setting);
 	return rc;
 }
 
@@ -1141,7 +1142,9 @@ static int cam_ois_fw_download_v2(struct cam_ois_ctrl_t *o_ctrl)
 	uint8_t                             fwcnt = 0;
 	uint8_t                             endianness = 0;
 
-	if (!o_ctrl) {
+	if (!o_ctrl || !o_ctrl->fw_info.fw_count ||
+	    !o_ctrl->fw_info.fw_param || !o_ctrl->i2c_fw_init_data ||
+	    !o_ctrl->i2c_fw_finalize_data) {
 		CAM_ERR(CAM_OIS, "Invalid Args");
 		return -EINVAL;
 	}
@@ -1170,6 +1173,7 @@ static int cam_ois_fw_download_v2(struct cam_ois_ctrl_t *o_ctrl)
 			CAM_INFO(CAM_OIS, "OIS FW version not matched, load FW");
 		} else {
 			CAM_WARN(CAM_OIS, "OIS FW version check failed,rc=%d", rc);
+			return rc < 0 ? rc : -EINVAL;
 		}
 	}
 
@@ -1180,6 +1184,9 @@ static int cam_ois_fw_download_v2(struct cam_ois_ctrl_t *o_ctrl)
 	}
 
 	for (count = 0; count < fwcnt; count++, fw_param++) {
+		rc = cam_ois_validate_fw_param(fw_param);
+		if (rc)
+			return rc;
 		fw_size       = fw_param->fw_size;
 		len_per_write = fw_param->fw_len_per_write / fw_param->fw_data_type;
 
@@ -1194,8 +1201,12 @@ static int cam_ois_fw_download_v2(struct cam_ois_ctrl_t *o_ctrl)
 			return rc;
 		}
 
-		if (0 == rc && NULL != fw &&
-			(fw_size <= fw->size - fw_param->fw_start_pos)) {
+		if (!fw || fw_param->fw_start_pos > fw->size ||
+		    fw_size > fw->size - fw_param->fw_start_pos) {
+			rc = -EINVAL;
+			goto release_firmware;
+		}
+		{
 
 			/* fw init */
 			CAM_DBG(CAM_OIS, "fw init");
@@ -1231,8 +1242,10 @@ static int cam_ois_fw_download_v2(struct cam_ois_ctrl_t *o_ctrl)
 			else if (fw_param->fw_operation == CAMERA_SENSOR_I2C_OP_CONT_WR_SEQN)
 				cont_wr_flag = CAM_SENSOR_I2C_WRITE_SEQ;
 
-			write_ois_fw(ptr, (endianness & OIS_ENDIANNESS_MASK_FW),
+			rc = write_ois_fw(ptr, (endianness & OIS_ENDIANNESS_MASK_FW),
 					fw_param, o_ctrl->io_master_info, cont_wr_flag);
+			if (rc)
+				goto release_firmware;
 
 			/* fw finalize */
 			CAM_DBG(CAM_OIS, "fw finalize");

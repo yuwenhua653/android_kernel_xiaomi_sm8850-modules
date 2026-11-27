@@ -106,3 +106,42 @@ zoom motion, streaming, reopen, multi-camera switching and suspend/resume.
 The host test also checks 0x1005 CRC/FIFO reclassification, overlapping/unknown
 masks, absent hardware events and unchanged IRQ subscription. Camera compilation
 is separate from real interrupt delivery, mixed-error recovery and HAL testing.
+
+## 2026-11-27: flash query compatibility and OIS transfer failures
+
+References reviewed:
+- MiCode camera `songyuan-w-oss`, commit
+  `798f548761f381b056f2e1fe615f9db930aa5c7e`: public U-series camera commands,
+  OIS/actuator and flash ABI. The Nezha flash query is 8 bytes: cmd_type at 3,
+  query_current_ma at 4. Generic ABI remains 12 bytes, current at 6.
+- MiCode camera `xuanyuan-v-oss`, commit
+  `be696c290bb4d6276810613c6b35e39e0ba5a366`: older Ultra OIS implementation
+  reviewed for comparison; its chip-specific firmware/registers are not copied.
+- Community https://github.com/mweinbach/lineage-os-xiaomi17u,
+  `docs/camera-baseline.md`: the document describes OS3 xiaomi.eu APK/static
+  dependencies, explicitly not a working Evolution X camera port. Useful for
+  separating app/HAL requirements from drivers; not evidence of OSS OIS support.
+
+Changes:
+- Nezha accepts the official 8-byte current query using explicit descriptor
+  length and cmd_type, alongside the unchanged generic 12-byte query. Errors
+  and absent LED providers leave output untouched. Descriptor bounds apply to
+  PMIC command parsing; spare allocation bytes are not part of a command.
+- OIS V2 validates the parameter table before reading entries, then subtracts
+  each payload length from remaining bytes. The version-data cursor advances
+  even if those settings have already been parsed (both parser versions).
+- Validate firmware names, data width, operation, sizes and register arithmetic
+  before transfer. Handle the final partial chunk and unaligned word data.
+  Propagate I/O errors and stop before finalization; reject out-of-range firmware
+  slices without unsigned underflow. A failed version read no longer triggers
+  a blind download. No embedded firmware or new flash-write protocol added.
+
+Run `python3 tools/test-nezha-camera-command-paths.py` from camera-kernel.
+Both generic/Nezha host C builds pass ASan/UBSan with fault injection, exact-size
+truncated allocations, firmware chunk and ownership assertions. Kernel I/O is
+modeled. This revision has no full ARM64 camera/module build or device pass.
+
+Still open: 64-byte OEM OIS names/extended opcode ABI, SEM1218S OIS firmware
+protocol (separate from the integrated zoom), private OIS/actuator park and
+voltage commands, complete stock HAL contract, open/reopen/multi-camera/flash
+hardware tests. No claims about image quality or stabilization are made.

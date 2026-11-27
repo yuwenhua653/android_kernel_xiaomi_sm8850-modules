@@ -1730,10 +1730,10 @@ put_ref:
 }
 
 static int cam_flash_pmic_query_current(struct cam_flash_ctrl *fctrl,
-	struct cam_flash_query_curr *flash_query_info,
+	int *current_ma,
 	struct cam_flash_private_soc *soc_private)
 {
-	int query_curr_ma = 0, rc = 0;
+	int query_curr_ma = 0, rc = -ENODEV;
 
 #if IS_REACHABLE(CONFIG_LEDS_QCOM_FLASH)
 	if (fctrl->pmic_lcdev[0] != NULL) {
@@ -1749,8 +1749,42 @@ static int cam_flash_pmic_query_current(struct cam_flash_ctrl *fctrl,
 	rc = -EOPNOTSUPP;
 #endif
 	CAM_DBG(CAM_FLASH, "query_curr_ma = %d", query_curr_ma);
-	flash_query_info->query_current_ma = query_curr_ma;
+	if (!rc) {
+		if (query_curr_ma < 0)
+			return -ERANGE;
+		*current_ma = query_curr_ma;
+	}
 	return rc;
+}
+
+/* Match the explicit descriptor length, not spare bytes in the allocation. */
+static bool cam_flash_is_nezha_query(const void *buf, size_t len)
+{
+	const struct cam_flash_query_curr_nezha *query = buf;
+
+	return IS_ENABLED(CONFIG_TARGET_PRODUCT_NEZHA) && buf &&
+		len == sizeof(*query) &&
+		query->cmd_type == CAMERA_SENSOR_FLASH_CMD_TYPE_QUERYCURR;
+}
+
+static int cam_flash_query_current_buf(struct cam_flash_ctrl *fctrl,
+	void *buf, size_t len, struct cam_flash_private_soc *soc_private)
+{
+	struct cam_flash_query_curr_nezha *nezha = buf;
+	struct cam_flash_query_curr *generic = buf;
+	bool stock = cam_flash_is_nezha_query(buf, len);
+	int current_ma, rc;
+
+	if (!buf || (!stock && len < sizeof(*generic)))
+		return -EINVAL;
+	rc = cam_flash_pmic_query_current(fctrl, &current_ma, soc_private);
+	if (rc)
+		return rc;
+	if (stock)
+		nezha->query_current_ma = current_ma;
+	else
+		generic->query_current_ma = current_ma;
+	return 0;
 }
 
 int cam_flash_pmic_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
@@ -1775,7 +1809,6 @@ int cam_flash_pmic_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
 	struct cam_flash_set_rer *flash_rer_info_u = NULL;
 	struct cam_flash_set_on_off *flash_operation_info = NULL;
 	struct cam_flash_set_on_off *flash_operation_info_u = NULL;
-	struct cam_flash_query_curr *flash_query_info = NULL;
 	struct cam_flash_frame_setting *flash_data = NULL;
 	struct cam_flash_private_soc *soc_private = NULL;
 
@@ -1860,6 +1893,13 @@ int cam_flash_pmic_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
 			goto end;
 		}
 		remain_len = len_of_buffer - cmd_desc->offset;
+		if (cmd_desc->length < sizeof(struct common_header) ||
+		    cmd_desc->length > remain_len) {
+			cam_mem_put_cpu_buf(cmd_desc->mem_handle);
+			rc = -EINVAL;
+			goto end;
+		}
+		remain_len = cmd_desc->length;
 		cmd_buf = (uint32_t *)((uint8_t *)cmd_buf_ptr +
 			cmd_desc->offset);
 		cam_flash_info = (struct cam_flash_init *)cmd_buf;
@@ -1986,6 +2026,13 @@ int cam_flash_pmic_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
 			goto end;
 		}
 		remain_len = len_of_buffer - cmd_desc->offset;
+		if (cmd_desc->length < sizeof(struct common_header) ||
+		    cmd_desc->length > remain_len) {
+			cam_mem_put_cpu_buf(cmd_desc->mem_handle);
+			rc = -EINVAL;
+			goto end;
+		}
+		remain_len = cmd_desc->length;
 
 		cmd_buf = (uint32_t *)((uint8_t *)cmd_buf_ptr +
 			cmd_desc->offset);
@@ -2104,11 +2151,19 @@ int cam_flash_pmic_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
 			goto end;
 		}
 		remain_len = len_of_buffer - cmd_desc->offset;
+		if (cmd_desc->length < sizeof(struct common_header) ||
+		    cmd_desc->length > remain_len) {
+			cam_mem_put_cpu_buf(cmd_desc->mem_handle);
+			rc = -EINVAL;
+			goto end;
+		}
+		remain_len = cmd_desc->length;
 		cmd_buf = (uint32_t *)((uint8_t *)cmd_buf_ptr +
 			cmd_desc->offset);
 		cmn_hdr = (struct common_header *)cmd_buf;
 
-		switch (cmn_hdr->cmd_type) {
+		switch (cam_flash_is_nezha_query(cmd_buf, remain_len) ?
+			CAMERA_SENSOR_FLASH_CMD_TYPE_QUERYCURR : cmn_hdr->cmd_type) {
 		case CAMERA_SENSOR_FLASH_CMD_TYPE_WIDGET: {
 			CAM_DBG(CAM_FLASH, "Widget Flash Operation");
 			if (remain_len < sizeof(struct cam_flash_set_on_off)) {
@@ -2172,19 +2227,10 @@ int cam_flash_pmic_pkt_parser(struct cam_flash_ctrl *fctrl, void *arg)
 			break;
 		}
 		case CAMERA_SENSOR_FLASH_CMD_TYPE_QUERYCURR: {
-			if (remain_len < sizeof(struct cam_flash_query_curr)) {
-				CAM_ERR(CAM_FLASH, "Not enough buffer");
-				rc = -EINVAL;
-				break;
-			}
-			flash_query_info =
-				(struct cam_flash_query_curr *)cmd_buf;
-			rc = cam_flash_pmic_query_current(fctrl,
-				flash_query_info, soc_private);
-			if (rc) {
-				CAM_ERR(CAM_FLASH,
-				"Query current failed with rc=%d", rc);
-			}
+			rc = cam_flash_query_current_buf(fctrl, cmd_buf,
+				remain_len, soc_private);
+			if (rc)
+				CAM_ERR(CAM_FLASH, "Query current failed: %d", rc);
 			break;
 		}
 		case CAMERA_SENSOR_FLASH_CMD_TYPE_RER: {
