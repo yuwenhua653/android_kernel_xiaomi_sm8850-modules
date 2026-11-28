@@ -9,7 +9,7 @@
 #include <linux/cma.h>
 #include "cam_ois_dev.h"
 
-#define OIS_NAME_LEN 32
+#define OIS_NAME_LEN MAX_OIS_NAME_SIZE
 #define OIS_ENDIANNESS_MASK_FW              0x0F
 #define OIS_ENDIANNESS_MASK_INPUTPARAM      0xF0
 

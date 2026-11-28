@@ -9,7 +9,7 @@ root=Path(__file__).resolve().parents[1]
 h=(root/'include/uapi/camera/media/cam_sensor.h').read_text()
 def struct(name):
  return re.search(r'struct '+name+r' \{.*?\} __attribute__\s*\(\(packed\)\);',h,re.S)[0]+'\n'
-structs=''.join(struct(n) for n in ['cam_flash_query_curr','cam_flash_query_curr_nezha','cam_cmd_ois_fw_param','cam_cmd_ois_fw_info_v2'])
+structs=''.join(struct(n) for n in ['cam_flash_query_curr','cam_flash_query_curr_nezha','cam_cmd_ois_fw_param','cam_cmd_ois_fw_info_v2','cam_ois_opcode'])
 s=(root/'drivers/cam_sensor_module/cam_ois/cam_ois_core.c').read_text()
 check=s[s.index('int cam_ois_fw_info_input_check'):s.index('static int cam_ois_fw_info_pkt_parser_v2')]
 body=s[s.index('static int cam_ois_validate_fw_param'):s.index('/**\n * cam_ois_pkt_parse')]
@@ -27,7 +27,11 @@ pre=r'''
 #include <string.h>
 #include <errno.h>
 typedef uint32_t __u32;typedef uint16_t __u16;typedef uint8_t __u8;
+#if CONFIG_TARGET_PRODUCT_NEZHA
+#define MAX_OIS_NAME_SIZE 64
+#else
 #define MAX_OIS_NAME_SIZE 32
+#endif
 #define CAM_OIS_FW_VERSION_CHECK_MASK 1
 #define OIS_ENDIANNESS_MASK_FW 15
 #define IS_ENABLED(x) (x)
@@ -64,6 +68,13 @@ static int alloc_fail,allocs,calls,fail_call,applies,apply_error,requests,releas
 static uint32_t seen[300],seen_count;
 static void *vmalloc(size_t n){if(alloc_fail)return NULL;void*p=malloc(n);assert(p);allocs++;return p;}
 static void vfree(void*p){assert(p);allocs--;free(p);}
+static void *vzalloc(size_t n){void *p=vmalloc(n);if(p)memset(p,0,n);return p;}
+#define array_size(a,b) ((a)*(b))
+#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
+static uint32_t get_unaligned_le32(const void *p){const uint8_t *b=p;return b[0]|((uint32_t)b[1]<<8)|((uint32_t)b[2]<<16)|((uint32_t)b[3]<<24);}
+static void put_unaligned_le32(uint32_t v,void *p){uint8_t *b=p;for(int k=0;k<4;k++)b[k]=v>>(8*k);}
+static int camera_io_dev_read_seq(struct camera_io_master *m,uint32_t a,uint8_t *b,int at,int dt,uint32_t n){memset(b,0,n);return 0;}
+static void msleep(int n){}
 static int write_io(struct cam_sensor_i2c_reg_setting*s){calls++;if(fail_call==calls)return -EIO;assert(s->size>0);for(int i=0;i<s->size;i++){assert(seen_count<300);seen[seen_count++]=s->reg_setting[i].reg_data;}return 0;}
 static int camera_io_dev_write(struct camera_io_master*m,struct cam_sensor_i2c_reg_setting*s){return write_io(s);}
 static int camera_io_dev_write_continuous(struct camera_io_master*m,struct cam_sensor_i2c_reg_setting*s,int op){return write_io(s);}
@@ -76,6 +87,7 @@ static int delete_request(struct i2c_settings_array*s){s->is_settings_valid=0;re
 '''
 post=r'''
 struct cam_ois_ctrl_t {
+ struct cam_ois_opcode opcode;char ois_name[MAX_OIS_NAME_SIZE];
  struct {uint8_t fw_count,endianness;struct cam_cmd_ois_fw_param *fw_param;}fw_info;
  struct i2c_settings_array i2c_fw_version_data,*i2c_fw_init_data,*i2c_fw_finalize_data;
  struct camera_io_master io_master_info;struct platform_device*pdev;

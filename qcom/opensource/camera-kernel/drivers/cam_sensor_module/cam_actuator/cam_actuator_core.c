@@ -438,61 +438,46 @@ int32_t cam_actuator_publish_dev_info(struct cam_req_mgr_device_info *info)
 
 static int32_t cam_actuator_park_lens_cb(void *priv, void *data)
 {
-	int32_t rc = 0;
 	struct cam_actuator_ctrl_t *a_ctrl = priv;
-	struct cam_actuator_soc_private *soc_private = NULL;
-	struct cam_sensor_power_ctrl_t  *power_info = NULL;
-
-	if (!a_ctrl) {
-		CAM_ERR(CAM_ACTUATOR, "Invalid Args");
+	struct cam_actuator_soc_private *soc_private;
+	struct cam_sensor_power_ctrl_t *power_info;
+	int ret = 0, rc;
+	bool powered_down = false;
+	if (!a_ctrl)
 		return -EINVAL;
-	}
-
-	soc_private =
-		(struct cam_actuator_soc_private *)a_ctrl->soc_info.soc_private;
+	soc_private = a_ctrl->soc_info.soc_private;
 	power_info = &soc_private->power_info;
-
-	mutex_lock(&(a_ctrl->actuator_park_mutex));
-	CAM_DBG(CAM_ACTUATOR, "Actuator park start in state: %d",
-		a_ctrl->cam_act_state);
+	mutex_lock(&a_ctrl->actuator_park_mutex);
 	if (a_ctrl->cam_act_state < CAM_ACTUATOR_CONFIG) {
-		CAM_ERR(CAM_ACTUATOR, "Actuator park in invalid state: %d",
-			a_ctrl->cam_act_state);
-		rc = -EINVAL;
-		goto end;
+		ret = -EINVAL;
+		goto cleanup;
 	}
-
-	rc = cam_actuator_apply_settings(a_ctrl, &a_ctrl->i2c_data.config_settings);
-	/* Power off regulator and release cci even if the apply is failed */
-	if (rc < 0)
-		CAM_ERR(CAM_ACTUATOR, "Apply park lens settings failed");
-
+	ret = cam_actuator_apply_settings(a_ctrl,
+					  &a_ctrl->i2c_data.config_settings);
 	rc = cam_actuator_power_down(a_ctrl);
-	if (rc < 0) {
-		CAM_ERR(CAM_ACTUATOR, "Actuator power down failed");
-		goto delete_req;
+	if (!ret)
+		ret = rc;
+	if (!rc) {
+		powered_down = true;
+		a_ctrl->cam_act_state = CAM_ACTUATOR_INIT;
 	}
-
-	a_ctrl->is_deferred_park_lens = false;
-	a_ctrl->cam_act_state = CAM_ACTUATOR_INIT;
-
-delete_req:
-	/* Delete the request even if the power down is failed */
+cleanup:
 	rc = delete_request(&a_ctrl->i2c_data.config_settings);
-	if (rc < 0)
-		CAM_ERR(CAM_ACTUATOR, "Fail in deleting the config settings");
-end:
-	CAM_MEM_FREE(power_info->power_setting);
-	CAM_MEM_FREE(power_info->power_down_setting);
-	power_info->power_setting = NULL;
-	power_info->power_down_setting = NULL;
-	power_info->power_down_setting_size = 0;
-	power_info->power_setting_size = 0;
-
-	CAM_DBG(CAM_ACTUATOR, "Actuator park end");
-	mutex_unlock(&(a_ctrl->actuator_park_mutex));
+	if (!ret)
+		ret = rc;
+	/* Keep the rail sequence for shutdown to retry a failed power-down. */
+	if (powered_down) {
+		CAM_MEM_FREE(power_info->power_setting);
+		CAM_MEM_FREE(power_info->power_down_setting);
+		power_info->power_setting = NULL;
+		power_info->power_down_setting = NULL;
+		power_info->power_setting_size = 0;
+		power_info->power_down_setting_size = 0;
+	}
+	WRITE_ONCE(a_ctrl->is_deferred_park_lens, false);
+	mutex_unlock(&a_ctrl->actuator_park_mutex);
 	complete_all(&a_ctrl->park_lens_complete);
-	return rc;
+	return ret;
 }
 
 static int cam_actuator_schedule_park_lens_task(
@@ -531,6 +516,150 @@ static int cam_actuator_wait_for_park_done(
 
 	return rc;
 }
+
+#if defined(CONFIG_TARGET_PRODUCT_NEZHA) && CONFIG_TARGET_PRODUCT_NEZHA
+/* Validate the complete descriptor before changing any supply. Roll back the
+ * preceding changes if a later regulator fails; never replace the first errno.
+ */
+static int cam_actuator_set_voltage(struct cam_actuator_ctrl_t *a_ctrl,
+				    const struct cam_cmd_buf_desc *desc)
+{
+	struct cam_hw_soc_info *soc;
+	struct cam_cmd_set_power_voltage *cmd = NULL;
+	uintptr_t address;
+	size_t size, count;
+	int index[MAX_POWER_CONFIG], old_uv[MAX_POWER_CONFIG];
+	int rc, rollback, i, j;
+	const char *name;
+	if (!a_ctrl)
+		return -EINVAL;
+	soc = &a_ctrl->soc_info;
+	if (!desc || a_ctrl->cam_act_state < CAM_ACTUATOR_CONFIG ||
+	    !desc->length || desc->length % sizeof(*cmd) ||
+	    desc->length / sizeof(*cmd) > MAX_POWER_CONFIG ||
+	    soc->num_rgltr <= 0 || soc->num_rgltr > CAM_SOC_MAX_REGULATOR)
+		return -EINVAL;
+	rc = cam_mem_get_cpu_buf(desc->mem_handle, &address, &size);
+	if (rc)
+		return rc;
+	if (desc->offset > size || desc->length > size - desc->offset) {
+		rc = -EINVAL;
+		goto put;
+	}
+	cmd = kmemdup((void *)(address + desc->offset), desc->length,
+		      GFP_KERNEL);
+	if (!cmd) {
+		rc = -ENOMEM;
+		goto put;
+	}
+	count = desc->length / sizeof(*cmd);
+	for (i = 0; i < count; i++) {
+		if (cmd[i].cmd_type !=
+			    CAMERA_SENSOR_POWER_CMD_TYPE_SET_VOLTAGE ||
+		    !cmd[i].voltage || cmd[i].voltage > INT_MAX) {
+			rc = -EINVAL;
+			goto put;
+		}
+		if (cmd[i].pin_type == SENSOR_BOB)
+			name = "cam_bob";
+		else if (cmd[i].pin_type == SENSOR_VAF)
+			name = "cam_vaf";
+		else {
+			rc = -EINVAL;
+			goto put;
+		}
+		for (j = 0; j < soc->num_rgltr; j++)
+			if (soc->rgltr_name[j] &&
+			    !strcmp(soc->rgltr_name[j], name))
+				break;
+		if (j == soc->num_rgltr || IS_ERR_OR_NULL(soc->rgltr[j])) {
+			rc = -ENODEV;
+			goto put;
+		}
+		index[i] = j;
+		rc = regulator_is_supported_voltage(
+			soc->rgltr[j], cmd[i].voltage, cmd[i].voltage);
+		if (rc <= 0) {
+			if (!rc)
+				rc = -ERANGE;
+			goto put;
+		}
+		old_uv[i] = regulator_get_voltage(soc->rgltr[j]);
+		if (old_uv[i] <= 0) {
+			rc = old_uv[i] ? old_uv[i] : -EIO;
+			goto put;
+		}
+	}
+	/* Release the imported buffer before sleeping on regulator transactions. */
+	cam_mem_put_cpu_buf(desc->mem_handle);
+	for (i = 0; i < count; i++) {
+		rc = regulator_set_voltage(soc->rgltr[index[i]], cmd[i].voltage,
+					   cmd[i].voltage);
+		if (rc) {
+			for (j = i; j >= 0; j--) {
+				rollback = regulator_set_voltage(
+					soc->rgltr[index[j]], old_uv[j],
+					old_uv[j]);
+				if (rollback)
+					CAM_ERR(CAM_ACTUATOR,
+						"Voltage rollback failed: %d",
+						rollback);
+			}
+			goto free;
+		}
+		if (cmd[i].delay_ms)
+			msleep(cmd[i].delay_ms);
+	}
+	rc = 0;
+	goto free;
+put:
+	cam_mem_put_cpu_buf(desc->mem_handle);
+free:
+	kfree(cmd);
+	return rc;
+}
+#endif
+
+#if defined(CONFIG_TARGET_PRODUCT_NEZHA) && CONFIG_TARGET_PRODUCT_NEZHA
+/* OEM park packets carry the same parsed I2C settings as the public driver.
+ * Complete the sequence and power-down under the caller's device mutex. This
+ * deliberately keeps ownership until completion instead of retaining a raw
+ * device pointer in an unjoined private parking thread. */
+static int cam_actuator_nezha_park(struct cam_actuator_ctrl_t *ctrl,
+				   struct cam_cmd_buf_desc *desc)
+{
+	struct i2c_settings_array settings = { 0 };
+	int ret, rc;
+	if (!ctrl || !desc || !desc->length ||
+	    ctrl->cam_act_state < CAM_ACTUATOR_CONFIG)
+		return -EINVAL;
+	mutex_lock(&ctrl->actuator_park_mutex);
+	if (ctrl->is_deferred_park_lens) {
+		mutex_unlock(&ctrl->actuator_park_mutex);
+		return -EBUSY;
+	}
+
+	INIT_LIST_HEAD(&settings.list_head);
+	settings.is_settings_valid = 1;
+	ret = cam_sensor_i2c_command_parser(&ctrl->io_master_info, &settings,
+					    desc, 1, NULL);
+	if (ret)
+		goto cleanup;
+	ret = cam_actuator_apply_settings(ctrl, &settings);
+	/* A failed movement still attempts power-down, preserving the first error. */
+	rc = cam_actuator_power_down(ctrl);
+	if (!rc)
+		ctrl->cam_act_state = CAM_ACTUATOR_ACQUIRE;
+	if (!ret)
+		ret = rc;
+cleanup:
+	rc = delete_request(&settings);
+	if (!ret)
+		ret = rc;
+	mutex_unlock(&ctrl->actuator_park_mutex);
+	return ret;
+}
+#endif
 
 int32_t cam_actuator_i2c_pkt_parse(struct cam_actuator_ctrl_t *a_ctrl,
 	void *arg)
@@ -956,12 +1085,39 @@ int32_t cam_actuator_i2c_pkt_parse(struct cam_actuator_ctrl_t *a_ctrl,
 		rc = cam_actuator_schedule_park_lens_task(a_ctrl);
 		if (rc) {
 			CAM_ERR(CAM_ACTUATOR, "Worker task scheduling failed %d", rc);
+			a_ctrl->is_deferred_park_lens = false;
+			delete_request(i2c_reg_settings);
+			complete_all(&a_ctrl->park_lens_complete);
 			mutex_unlock(&(a_ctrl->actuator_park_mutex));
 			break;
 		}
 
 		mutex_unlock(&(a_ctrl->actuator_park_mutex));
 		break;
+#if defined(CONFIG_TARGET_PRODUCT_NEZHA) && CONFIG_TARGET_PRODUCT_NEZHA
+	case CAM_ACTUATOR_PACKET_OPCODE_SET_VOLTAGE:
+		if (csl_packet->num_cmd_buf != 1) {
+			rc = -EINVAL;
+			break;
+		}
+		offset = (uint32_t *)&csl_packet->payload_flex;
+		offset += csl_packet->cmd_buf_offset / sizeof(uint32_t);
+		cmd_desc = (struct cam_cmd_buf_desc *)offset;
+		rc = cam_actuator_set_voltage(a_ctrl, cmd_desc);
+		break;
+#endif
+#if defined(CONFIG_TARGET_PRODUCT_NEZHA) && CONFIG_TARGET_PRODUCT_NEZHA
+	case CAM_ACTUATOR_PACKET_OPCODE_MIPARK_LENS:
+		if (csl_packet->num_cmd_buf != 1) {
+			rc = -EINVAL;
+			break;
+		}
+		offset = (uint32_t *)&csl_packet->payload_flex;
+		offset += csl_packet->cmd_buf_offset / sizeof(uint32_t);
+		cmd_desc = (struct cam_cmd_buf_desc *)offset;
+		rc = cam_actuator_nezha_park(a_ctrl, cmd_desc);
+		break;
+#endif
 	default:
 		CAM_ERR(CAM_ACTUATOR, "Wrong Opcode: %d",
 			csl_packet->header.op_code & 0xFFFFFF);
@@ -988,13 +1144,14 @@ void cam_actuator_shutdown(struct cam_actuator_ctrl_t *a_ctrl)
 		"Actuator shutdown in state: %d is_deferred_park_lens: %d",
 		a_ctrl->cam_act_state, a_ctrl->is_deferred_park_lens);
 
-	if (a_ctrl->is_deferred_park_lens)
-		cam_actuator_wait_for_park_done(a_ctrl);
+	if (READ_ONCE(a_ctrl->is_deferred_park_lens))
+		wait_for_completion(&a_ctrl->park_lens_complete);
+	mutex_lock(&a_ctrl->actuator_park_mutex);
 
 	a_ctrl->is_deferred_park_lens = false;
 
 	if (a_ctrl->cam_act_state == CAM_ACTUATOR_INIT)
-		return;
+		goto out;
 
 	if (a_ctrl->cam_act_state >= CAM_ACTUATOR_CONFIG) {
 		rc = cam_actuator_power_down(a_ctrl);
@@ -1021,6 +1178,8 @@ void cam_actuator_shutdown(struct cam_actuator_ctrl_t *a_ctrl)
 	a_ctrl->last_flush_req = 0;
 
 	a_ctrl->cam_act_state = CAM_ACTUATOR_INIT;
+out:
+	mutex_unlock(&a_ctrl->actuator_park_mutex);
 }
 
 int32_t cam_actuator_driver_cmd(struct cam_actuator_ctrl_t *a_ctrl,

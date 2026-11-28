@@ -13,7 +13,11 @@
 
 #define CAM_SENSOR_PROBE_CMD      (CAM_COMMON_OPCODE_MAX + 1)
 #define CAM_FLASH_MAX_LED_TRIGGERS 2
+#if defined(CONFIG_TARGET_PRODUCT_NEZHA) && CONFIG_TARGET_PRODUCT_NEZHA
+#define MAX_OIS_NAME_SIZE 64
+#else
 #define MAX_OIS_NAME_SIZE 32
+#endif
 #define MAX_OIS_FW_COUNT  2
 #define CAM_CSIPHY_SECURE_MODE_ENABLED 1
 #define CAM_SENSOR_NAME_MAX_SIZE 32
@@ -82,6 +86,9 @@ enum cam_actuator_packet_opcodes {
 	CAM_ACTUATOR_PACKET_MANUAL_MOVE_LENS,
 	CAM_ACTUATOR_PACKET_OPCODE_READ,
 	CAM_ACTUATOR_PACKET_OPCODE_PARK_LENS,
+	/* OEM opcodes are explicit so the generic ABI is unchanged. */
+	CAM_ACTUATOR_PACKET_OPCODE_MIPARK_LENS = 5,
+	CAM_ACTUATOR_PACKET_OPCODE_SET_VOLTAGE = 6,
 	CAM_ACTUATOR_PACKET_NOP_OPCODE = 127
 };
 
@@ -94,7 +101,8 @@ enum cam_ois_packet_opcodes {
 	CAM_OIS_PACKET_OPCODE_INIT,
 	CAM_OIS_PACKET_OPCODE_OIS_CONTROL,
 	CAM_OIS_PACKET_OPCODE_READ,
-	CAM_OIS_PACKET_OPCODE_WRITE_TIME
+	CAM_OIS_PACKET_OPCODE_WRITE_TIME,
+	CAM_OIS_PACKET_OPCODE_OIS_PARKLENS = 4
 };
 
 enum camera_sensor_i2c_op_code {
@@ -464,6 +472,16 @@ struct cam_ois_opcode {
 	__u32 coeff;
 	__u32 pheripheral;
 	__u32 memory;
+#if defined(CONFIG_TARGET_PRODUCT_NEZHA) && CONFIG_TARGET_PRODUCT_NEZHA
+	/* MiCode songyuan-w-oss 798f548761f3: packed OEM slave-info ABI. */
+	__u32 afcoeff;
+	__u32 fw_version_addr;
+	__u8 fw_addr_type;
+	__u8 is_addr_increase;
+	__u8 customized_ois_flag;
+	__u8 fw_mem_store;
+	__u8 is_ois_fw_update;
+#endif
 } __attribute__((packed));
 
 /**
@@ -1414,6 +1432,15 @@ struct cam_cmd_zoom_info {
 struct cam_sensor_query_cap_nezha {
 	struct cam_sensor_query_cap base;
 	__u32 zoom_slot_id;
+} __attribute__((packed));
+
+/* MiCode songyuan-w-oss 798f548761f3: actuator voltage command, type 19. */
+#define CAMERA_SENSOR_POWER_CMD_TYPE_SET_VOLTAGE 19
+struct cam_cmd_set_power_voltage {
+	__u32 voltage;
+	__u8 pin_type;
+	__u8 cmd_type;
+	__u16 delay_ms;
 } __attribute__((packed));
 
 #endif

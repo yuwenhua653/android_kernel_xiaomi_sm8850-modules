@@ -134,7 +134,7 @@ struct cam_ois_ctrl_t {
 	struct i2c_settings_array i2c_mode_data;
 	struct i2c_settings_array i2c_time_data;
 	enum cam_ois_state cam_ois_state;
-	char ois_name[32];
+	char ois_name[MAX_OIS_NAME_SIZE];
 	uint8_t ois_fw_flag;
 	uint8_t is_ois_calib;
 	struct cam_ois_opcode opcode;

@@ -145,3 +145,58 @@ Still open: 64-byte OEM OIS names/extended opcode ABI, SEM1218S OIS firmware
 protocol (separate from the integrated zoom), private OIS/actuator park and
 voltage commands, complete stock HAL contract, open/reopen/multi-camera/flash
 hardware tests. No claims about image quality or stabilization are made.
+
+## OIS, actuator voltage and parking transactions (2026-11-28)
+
+The same pinned MiCode revision `798f548761f381b056f2e1fe615f9db930aa5c7e`
+supplies the OEM OIS slave-info layout, SEM1218S transport, actuator voltage
+command and OEM parking opcodes. This batch makes the following integration:
+
+- Only Nezha uses 64-byte OIS names and the 29-byte extended opcode. Packed
+  slave-info is 101 bytes (opcode offset 72); generic builds retain the original
+  32-byte name, 16-byte opcode and 56-byte slave-info. Reject short declared
+  buffers, missing name terminators and unsupported flags before mutation.
+- SEM1218S uses the official 48 KiB image, update registers, chunk sizes and CRC
+  polynomial. All transfer errors abort before CRC commit/reset; device error
+  and post-reset version are checked. Respect HAL's firmware-update opt-in.
+  Firmware binaries are still provided by the matching vendor installation;
+  none are added here. The fw_mem_store hint is accepted but does not add a
+  persistent firmware cache.
+- Actuator SET_VOLTAGE opcode 6 / command type 19 parses packed 8-byte entries.
+  Validate the complete list, pin types, regulators, supported voltage and old
+  voltage before any write; release imported memory before regulator calls.
+  Roll back the failed entry and preceding entries, retain the first errno.
+  Voltages are HAL requests subject to regulator constraints, not invented DT
+  replacements or raised limits.
+- OEM actuator park opcode 5 and OIS park opcode 4 parse into owned local I2C
+  lists, apply the sequence, attempt power-down even after movement failure,
+  retain the first error, and free the lists on every path. Reject empty input
+  and overlapping generic actuator parking. State changes follow power-down
+  acknowledgment.
+- Generic actuator park enqueue failure releases partial settings and completes
+  waiters. Its worker completes on every path and retains power sequences after
+  a failed power-down. Shutdown waits for a running park operation before freeing
+  those sequences, instead of ignoring a 100 ms timeout.
+
+OEM parking deliberately executes synchronously under the existing device mutex,
+not in the official private background thread. This preserves ownership and
+cleanup, but HAL timeout behavior, shared CCI/rail sequencing, mechanical travel,
+close/reopen and simultaneous devices require hardware verification. No physical
+firmware programming, optical movement or camera streaming was performed.
+
+Seven host scripts cover actual UAPI headers (generic and Nezha), zoom, CSI,
+command bounds, OIS SEM1218S, actuator voltage and parking. The new OIS test injects
+196 transfer failures and checks a separately calculated CRC; voltage and parking
+tests inject parser, regulator, movement and power-down failures. ASan/UBSan are
+used for executable host models; LeakSanitizer is disabled under the host tracer.
+Exact source hashes, build commands and results accompany the kernel's
+`android/nezha-native/mca-wireless-camera-validation-20261128.json`.
+
+Final build result: full kernel Image and 401 in-tree modules passed strict
+modpost. The hw_fence, synx, securemsm and mmrm dependency modules and camera.ko
+then passed ARM64 Kbuild and strict external-module modpost against the same
+Module.symvers. No warning/error occurred in the final camera build; securemsm
+prints four pre-existing qseecom header deprecation notices. Local validation
+uses LLVM 19.1.7 with CFI/MODVERSIONS; Rust, BTF and automatic module signing
+are disabled only in the output configuration. This is not signed production
+DLKM/boot-image qualification or hardware acceptance.
