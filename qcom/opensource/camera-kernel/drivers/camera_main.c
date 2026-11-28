@@ -23,6 +23,7 @@
 #include "cam_res_mgr_api.h"
 #include "cam_cci_dev.h"
 #include "cam_sensor_dev.h"
+#include "cam_sensor_util.h"
 #include "cam_actuator_dev.h"
 #ifdef CONFIG_TARGET_PRODUCT_NEZHA
 #include "cam_zoom_dev.h"
@@ -315,6 +316,9 @@ static int camera_init(void)
 	if (rc)
 		goto end_init;
 
+#if defined(CONFIG_TARGET_PRODUCT_NEZHA) && CONFIG_TARGET_PRODUCT_NEZHA
+	cam_nezha_init_cci_power_locks();
+#endif
 	cam_debugfs_init();
 
 	rc = cam_soc_util_create_debugfs();

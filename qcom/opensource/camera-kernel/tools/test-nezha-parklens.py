@@ -24,11 +24,21 @@ pre=r'''
 #define CAM_ACTUATOR_ACQUIRE 1
 #define CAM_ACTUATOR_INIT 0
 #define WRITE_ONCE(x,v) ((x)=(v))
-struct list_head {int initialized;};struct i2c_settings_array {struct list_head list_head;int is_settings_valid,allocated;};
+enum { CAM_SENSOR_I2C_WRITE_RANDOM, CAM_SENSOR_I2C_WRITE_SEQ, CAM_SENSOR_I2C_WRITE_BURST, CAM_SENSOR_I2C_POLL };
+struct i2c_settings_list {int op_code; struct {unsigned int delay;}i2c_settings;};
+struct list_head {int initialized;struct i2c_settings_list steps[22];unsigned int count;};
+#define list_empty(h) (!(h)->count)
+#define list_for_each_entry(v,h,member) for((v)=(h)->steps;(v)<(h)->steps+(h)->count;(v)++)
+#define min(a,b) ((a)<(b)?(a):(b))
+#define I2C_COMPARE_MISMATCH 1
+static unsigned int waited;
+static void msleep(unsigned int ms){waited+=ms;}
+static void usleep_range(unsigned int low,unsigned int high){(void)high;waited+=low/1000;}
+struct i2c_settings_array {struct list_head list_head;int is_settings_valid,allocated;};
 struct cam_cmd_buf_desc {int length;};struct camera_io_master {int unused;};
 struct cam_sensor_power_ctrl_t {void *power_setting,*power_down_setting;int power_setting_size,power_down_setting_size;};
 struct cam_actuator_soc_private {struct cam_sensor_power_ctrl_t power_info;};struct soc_info {void *soc_private;};
-struct cam_actuator_ctrl_t {int cam_act_state,actuator_park_mutex,park_lens_complete;bool is_deferred_park_lens;struct camera_io_master io_master_info;struct soc_info soc_info;struct {struct i2c_settings_array config_settings;}i2c_data;};
+struct cam_actuator_ctrl_t {struct {int device_hdl;}bridge_intf;int cam_act_state,actuator_park_mutex,park_lens_complete;bool is_deferred_park_lens;struct camera_io_master io_master_info;struct soc_info soc_info;struct {struct i2c_settings_array config_settings;}i2c_data;};
 struct cam_ois_ctrl_t {int cam_ois_state;struct camera_io_master io_master_info;};
 static int parse_error,apply_error,power_error,delete_error,parsed,applied,powered,deleted,allocs,freed,completed;
 static void INIT_LIST_HEAD(struct list_head *l){l->initialized=1;}
@@ -36,17 +46,18 @@ static void mutex_lock(int *m){assert(!*m);*m=1;}static void mutex_unlock(int *m
 static void complete_all(int *c){*c=1;completed++;}
 static void cam_mem_free(void *p){if(p)freed++;}
 #define CAM_MEM_FREE(p) cam_mem_free(p)
-static int cam_sensor_i2c_command_parser(struct camera_io_master *io,struct i2c_settings_array *s,struct cam_cmd_buf_desc *d,int n,void *unused){(void)io;(void)d;(void)unused;assert(n==1&&s->list_head.initialized&&s->is_settings_valid);parsed++;s->allocated=1;allocs++;return parse_error;}
+static int cam_sensor_i2c_command_parser(struct camera_io_master *io,struct i2c_settings_array *s,struct cam_cmd_buf_desc *d,int n,void *unused){(void)io;(void)d;(void)unused;assert(n==1&&s->list_head.initialized&&s->is_settings_valid);parsed++;s->allocated=1;s->list_head.count=1;allocs++;return parse_error;}
 static int apply(void){applied++;return apply_error;}static int power(void){powered++;return power_error;}
 static int cam_actuator_apply_settings(struct cam_actuator_ctrl_t *c,struct i2c_settings_array *s){(void)c;assert(s->allocated);return apply();}
-static int cam_ois_apply_settings(struct cam_ois_ctrl_t *c,struct i2c_settings_array *s){(void)c;assert(s->allocated);return apply();}
+static int cam_actuator_i2c_modes_util(struct camera_io_master *c,struct i2c_settings_list *s){(void)c;assert(s->i2c_settings.delay==0);return apply();}
+static int cam_ois_apply_one(struct cam_ois_ctrl_t *c,struct i2c_settings_list *s){(void)c;assert(s->i2c_settings.delay==0);return apply();}
 static int cam_actuator_power_down(struct cam_actuator_ctrl_t *c){(void)c;return power();}
 static int cam_ois_power_down(struct cam_ois_ctrl_t *c){(void)c;return power();}
 static int delete_request(struct i2c_settings_array *s){deleted++;if(s->allocated){s->allocated=0;allocs--;}return delete_error;}
 static void reset(void){assert(!allocs);parse_error=apply_error=power_error=delete_error=parsed=applied=powered=deleted=freed=completed=0;}
 '''
-s=(r/'drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c').read_text();body=fn(s,'cam_actuator_nezha_park')+fn(s,'cam_actuator_park_lens_cb')
-s=(r/'drivers/cam_sensor_module/cam_ois/cam_ois_core.c').read_text();body+=fn(s,'cam_ois_nezha_park')
+s=(r/'drivers/cam_sensor_module/cam_actuator/cam_actuator_core.c').read_text();body=fn(s,'cam_actuator_nezha_park_steps')+fn(s,'cam_actuator_nezha_park')+fn(s,'cam_actuator_park_lens_cb')
+s=(r/'drivers/cam_sensor_module/cam_ois/cam_ois_core.c').read_text();body+=fn(s,'cam_ois_nezha_park_steps')+fn(s,'cam_ois_nezha_park')
 main=r'''
 int main(void){
  struct cam_cmd_buf_desc d={1};
@@ -63,8 +74,18 @@ int main(void){
   a=(struct cam_actuator_ctrl_t){.cam_act_state=2,.is_deferred_park_lens=true,.soc_info={&sp},.i2c_data.config_settings={.allocated=1}};allocs=1;
   if(failure==1)apply_error=-EIO;if(failure==2)power_error=-EREMOTEIO;if(failure==3){apply_error=-EIO;power_error=-EREMOTEIO;delete_error=-EINVAL;}
   int ret=cam_actuator_park_lens_cb(&a,NULL);assert(ret==((failure==1||failure==3)?-EIO:failure==2?-EREMOTEIO:0));assert(completed==1&&!allocs&&!a.is_deferred_park_lens&&!a.actuator_park_mutex&&powered==1);
-  if(power_error){assert(!freed&&sp.power_info.power_setting&&sp.power_info.power_down_setting&&a.cam_act_state==2);}else{assert(freed==2&&!sp.power_info.power_setting&&!sp.power_info.power_down_setting&&a.cam_act_state==0);}
+  if(power_error){assert(!freed&&sp.power_info.power_setting&&sp.power_info.power_down_setting&&a.cam_act_state==2);}else{assert(freed==2&&!sp.power_info.power_setting&&!sp.power_info.power_down_setting&&a.cam_act_state==CAM_ACTUATOR_ACQUIRE);}
  }
+ struct i2c_settings_array steps={0};
+ reset();assert(cam_actuator_nezha_park_steps(&a,&steps)==-EINVAL);
+ steps.list_head.count=3;steps.list_head.steps[0].i2c_settings.delay=0;steps.list_head.steps[1].i2c_settings.delay=35;steps.list_head.steps[2].i2c_settings.delay=1000;
+ waited=0;assert(!cam_actuator_nezha_park_steps(&a,&steps)&&waited==55&&applied==3);
+ steps.list_head.count=1;steps.list_head.steps[0].op_code=9;reset();assert(cam_actuator_nezha_park_steps(&a,&steps)==-EOPNOTSUPP&&!applied);
+ steps.list_head.steps[0].op_code=CAM_SENSOR_I2C_POLL;apply_error=I2C_COMPARE_MISMATCH;assert(cam_actuator_nezha_park_steps(&a,&steps)==-EIO);
+ steps.list_head.count=21;reset();assert(cam_actuator_nezha_park_steps(&a,&steps)==-E2BIG&&applied==20);
+ steps.list_head.count=2;steps.list_head.steps[0].i2c_settings.delay=20;steps.list_head.steps[1].i2c_settings.delay=90;
+ reset();waited=0;assert(cam_ois_nezha_park_steps(&o,&steps)==-ETIMEDOUT&&applied==2&&waited==98);
+ reset();steps.list_head.count=1;apply_error=I2C_COMPARE_MISMATCH;assert(cam_ois_nezha_park_steps(&o,&steps)==-EIO);
  puts("PASS: OEM OIS/actuator park, partial parse cleanup, movement/power errors, state acknowledgment, generic park completion and retained retry resources");
 }
 '''

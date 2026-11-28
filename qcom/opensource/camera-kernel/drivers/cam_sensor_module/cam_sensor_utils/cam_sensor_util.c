@@ -12,6 +12,36 @@
 #include "cam_mem_mgr.h"
 #include "cam_res_mgr_api.h"
 #include "cam_mem_mgr_api.h"
+#if defined(CONFIG_TARGET_PRODUCT_NEZHA) && CONFIG_TARGET_PRODUCT_NEZHA
+/* Dimensions match Nezha's upstream camera power synchronisation table. */
+static struct mutex nezha_cci_power[4][3];
+static DEFINE_MUTEX(nezha_unknown_cci_power);
+
+void cam_nezha_init_cci_power_locks(void)
+{
+	unsigned int device, master;
+
+	for (device = 0; device < ARRAY_SIZE(nezha_cci_power); device++)
+		for (master = 0; master < ARRAY_SIZE(nezha_cci_power[0]); master++)
+			mutex_init(&nezha_cci_power[device][master]);
+}
+
+struct mutex *cam_nezha_lock_cci_power(struct camera_io_master *io)
+{
+	struct mutex *lock = &nezha_unknown_cci_power;
+	unsigned int device, master;
+
+	if (io->master_type != CCI_MASTER || !io->cci_client)
+		return NULL;
+	device = io->cci_client->cci_device;
+	master = io->cci_client->cci_i2c_master;
+	if (device < ARRAY_SIZE(nezha_cci_power) && master < ARRAY_SIZE(nezha_cci_power[0]))
+		lock = &nezha_cci_power[device][master];
+	mutex_lock(lock);
+	return lock;
+}
+#endif
+
 #define CAM_SENSOR_PINCTRL_STATE_SLEEP "cam_suspend"
 #define CAM_SENSOR_PINCTRL_STATE_DEFAULT "cam_default"
 

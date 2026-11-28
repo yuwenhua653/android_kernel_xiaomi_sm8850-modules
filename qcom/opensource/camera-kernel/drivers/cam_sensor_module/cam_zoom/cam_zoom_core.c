@@ -83,6 +83,7 @@ static int32_t cam_zoom_power_up(struct cam_zoom_ctrl_t *z_ctrl)
 	struct completion                      *i3c_probe_completion = NULL;
 	struct timespec64                       ts1, ts2; // xiaomi add
 	long                                    microsec = 0; // xiaomi add
+	CAM_NEZHA_CCI_POWER_GUARD(&z_ctrl->io_master_info);
 
 	/* xiaomi add begin */
 	CAM_GET_TIMESTAMP(ts1);
@@ -167,6 +168,7 @@ static int32_t cam_zoom_power_down(struct cam_zoom_ctrl_t *z_ctrl)
 	struct cam_zoom_soc_private  *soc_private;
 	struct timespec64 ts1, ts2; // xiaomi add
 	long microsec = 0; // xiaomi add
+	CAM_NEZHA_CCI_POWER_GUARD(&z_ctrl->io_master_info);
 
 	/* xiaomi add begin */
 	CAM_GET_TIMESTAMP(ts1);

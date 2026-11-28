@@ -125,6 +125,10 @@ static int cam_ois_get_dev_handle(struct cam_ois_ctrl_t *o_ctrl,
 	CAM_DBG(CAM_OIS, "Device Handle: %d", ois_acq_dev.device_handle);
 	if (copy_to_user(u64_to_user_ptr(cmd->handle), &ois_acq_dev,
 		sizeof(struct cam_sensor_acquire_dev))) {
+		if (!cam_destroy_device_hdl(o_ctrl->bridge_intf.device_hdl)) {
+			o_ctrl->bridge_intf.device_hdl = -1;
+			o_ctrl->bridge_intf.session_hdl = -1;
+		}
 		CAM_ERR(CAM_OIS, "ACQUIRE_DEV: copy to user failed");
 		return -EFAULT;
 	}
@@ -138,6 +142,7 @@ static int cam_ois_power_up(struct cam_ois_ctrl_t *o_ctrl)
 	struct cam_ois_soc_private             *soc_private;
 	struct cam_sensor_power_ctrl_t         *power_info;
 	struct completion                      *i3c_probe_completion = NULL;
+	CAM_NEZHA_CCI_POWER_GUARD(&o_ctrl->io_master_info);
 
 	soc_private = (struct cam_ois_soc_private *)o_ctrl->soc_info.soc_private;
 	power_info = &soc_private->power_info;
@@ -214,6 +219,7 @@ static int cam_ois_power_down(struct cam_ois_ctrl_t *o_ctrl)
 	struct cam_hw_soc_info          *soc_info =
 		&o_ctrl->soc_info;
 	struct cam_ois_soc_private *soc_private;
+	CAM_NEZHA_CCI_POWER_GUARD(&o_ctrl->io_master_info);
 
 	if (!o_ctrl) {
 		CAM_ERR(CAM_OIS, "failed: o_ctrl %pK", o_ctrl);
@@ -311,68 +317,51 @@ static int cam_ois_update_time(struct i2c_settings_array *i2c_set,
 	return rc;
 }
 
-static int cam_ois_apply_settings(struct cam_ois_ctrl_t *o_ctrl,
-	struct i2c_settings_array *i2c_set)
+static int cam_ois_apply_one(struct cam_ois_ctrl_t *ctrl, struct i2c_settings_list *step)
 {
-	struct i2c_settings_list *i2c_list;
-	int32_t rc = 0;
-	uint32_t i, size;
+	struct cam_sensor_i2c_reg_setting *setting = &step->i2c_settings;
+	unsigned int i;
+	int ret;
 
-	if (o_ctrl == NULL || i2c_set == NULL) {
-		CAM_ERR(CAM_OIS, "Invalid Args");
-		return -EINVAL;
-	}
+	switch (step->op_code) {
+	case CAM_SENSOR_I2C_WRITE_RANDOM:
+		return camera_io_dev_write(&ctrl->io_master_info, setting);
+	case CAM_SENSOR_I2C_WRITE_SEQ:
+	case CAM_SENSOR_I2C_WRITE_BURST:
+		return camera_io_dev_write_continuous(&ctrl->io_master_info, setting, step->op_code);
+	case CAM_SENSOR_I2C_POLL:
+		for (i = 0; i < setting->size; i++) {
+			struct cam_sensor_i2c_reg_array *reg = &setting->reg_setting[i];
 
-	if (i2c_set->is_settings_valid != 1) {
-		CAM_ERR(CAM_OIS, " Invalid settings");
-		return -EINVAL;
-	}
-
-	list_for_each_entry(i2c_list,
-		&(i2c_set->list_head), list) {
-		if (i2c_list->op_code ==  CAM_SENSOR_I2C_WRITE_RANDOM) {
-			rc = camera_io_dev_write(&(o_ctrl->io_master_info),
-				&(i2c_list->i2c_settings));
-			if (rc < 0) {
-				CAM_ERR(CAM_OIS,
-					"Failed in Applying i2c wrt settings");
-				return rc;
-			}
-		} else if (i2c_list->op_code == CAM_SENSOR_I2C_WRITE_SEQ) {
-			rc = camera_io_dev_write_continuous(
-				&(o_ctrl->io_master_info),
-				&(i2c_list->i2c_settings),
-				CAM_SENSOR_I2C_WRITE_SEQ);
-			if (rc < 0) {
-				CAM_ERR(CAM_OIS,
-					"Failed to seq write I2C settings: %d",
-					rc);
-				return rc;
-			}
-		} else if (i2c_list->op_code == CAM_SENSOR_I2C_POLL) {
-			size = i2c_list->i2c_settings.size;
-			for (i = 0; i < size; i++) {
-				rc = camera_io_dev_poll(
-				&(o_ctrl->io_master_info),
-				i2c_list->i2c_settings.reg_setting[i].reg_addr,
-				i2c_list->i2c_settings.reg_setting[i].reg_data,
-				i2c_list->i2c_settings.reg_setting[i].data_mask,
-				i2c_list->i2c_settings.addr_type,
-				i2c_list->i2c_settings.data_type,
-				i2c_list->i2c_settings.reg_setting[i].delay);
-				if (rc < 0) {
-					CAM_ERR(CAM_OIS,
-						"i2c poll apply setting Fail");
-					return rc;
-				} else if (rc ==  I2C_COMPARE_MISMATCH) {
-					CAM_ERR(CAM_OIS, "i2c poll mismatch");
-					return rc;
-				}
-			}
+			ret = camera_io_dev_poll(&ctrl->io_master_info, reg->reg_addr, reg->reg_data,
+					reg->data_mask, setting->addr_type, setting->data_type, reg->delay);
+			if (ret < 0 || ret == I2C_COMPARE_MISMATCH)
+				return ret;
 		}
+		return 0;
+	default:
+		return -EOPNOTSUPP;
 	}
+}
 
-	return rc;
+static int cam_ois_apply_settings(struct cam_ois_ctrl_t *ctrl,
+				  struct i2c_settings_array *settings)
+{
+	struct i2c_settings_list *step;
+	int ret;
+
+	if (!ctrl || !settings || settings->is_settings_valid != 1)
+		return -EINVAL;
+	list_for_each_entry(step, &settings->list_head, list) {
+		/* This path historically skips non-write/poll and burst settings. */
+		if (step->op_code != CAM_SENSOR_I2C_WRITE_RANDOM &&
+		    step->op_code != CAM_SENSOR_I2C_WRITE_SEQ && step->op_code != CAM_SENSOR_I2C_POLL)
+			continue;
+		ret = cam_ois_apply_one(ctrl, step);
+		if (ret)
+			return ret;
+	}
+	return 0;
 }
 
 static int cam_ois_slaveInfo_pkt_parser(struct cam_ois_ctrl_t *o_ctrl,
@@ -1450,6 +1439,37 @@ release_firmware:
  * Complete the sequence and power-down under the caller's device mutex. This
  * deliberately keeps ownership until completion instead of retaining a raw
  * device pointer in an unjoined private parking thread. */
+/* Stock accounts one tick per command and one per millisecond of delay. */
+static int cam_ois_nezha_park_steps(struct cam_ois_ctrl_t *ctrl,
+				   struct i2c_settings_array *settings)
+{
+	struct i2c_settings_list *step;
+	unsigned int remaining = 100;
+	int ret;
+
+	if (list_empty(&settings->list_head))
+		return -EINVAL;
+	list_for_each_entry(step, &settings->list_head, list) {
+		unsigned int delay = step->i2c_settings.delay;
+		unsigned int wait;
+
+		if (!remaining)
+			return -ETIMEDOUT;
+		remaining--;
+		step->i2c_settings.delay = 0;
+		ret = cam_ois_apply_one(ctrl, step);
+		if (ret)
+			return ret == I2C_COMPARE_MISMATCH ? -EIO : ret;
+		wait = min(delay, remaining);
+		if (wait)
+			usleep_range(wait * 1000, wait * 1000 + 100);
+		if (wait < delay)
+			return -ETIMEDOUT;
+		remaining -= wait;
+	}
+	return 0;
+}
+
 static int cam_ois_nezha_park(struct cam_ois_ctrl_t *ctrl,
 			      struct cam_cmd_buf_desc *desc)
 {
@@ -1465,7 +1485,7 @@ static int cam_ois_nezha_park(struct cam_ois_ctrl_t *ctrl,
 					    desc, 1, NULL);
 	if (ret)
 		goto cleanup;
-	ret = cam_ois_apply_settings(ctrl, &settings);
+	ret = cam_ois_nezha_park_steps(ctrl, &settings);
 	/* A failed movement still attempts power-down, preserving the first error. */
 	rc = cam_ois_power_down(ctrl);
 	if (!rc)
@@ -2043,30 +2063,12 @@ put_ref:
 	return rc;
 }
 
-void cam_ois_shutdown(struct cam_ois_ctrl_t *o_ctrl)
+static void cam_ois_free_session(struct cam_ois_ctrl_t *o_ctrl)
 {
 	int rc = 0, i = 0;
 	struct cam_ois_soc_private *soc_private =
 		(struct cam_ois_soc_private *)o_ctrl->soc_info.soc_private;
 	struct cam_sensor_power_ctrl_t *power_info = &soc_private->power_info;
-
-	if (o_ctrl->cam_ois_state == CAM_OIS_INIT)
-		return;
-
-	if (o_ctrl->cam_ois_state >= CAM_OIS_CONFIG) {
-		rc = cam_ois_power_down(o_ctrl);
-		if (rc < 0)
-			CAM_ERR(CAM_OIS, "OIS Power down failed");
-	}
-
-	if (o_ctrl->cam_ois_state >= CAM_OIS_ACQUIRE) {
-		rc = cam_destroy_device_hdl(o_ctrl->bridge_intf.device_hdl);
-		if (rc < 0)
-			CAM_ERR(CAM_OIS, "destroying the device hdl");
-		o_ctrl->bridge_intf.device_hdl = -1;
-		o_ctrl->bridge_intf.link_hdl = -1;
-		o_ctrl->bridge_intf.session_hdl = -1;
-	}
 
 	if (o_ctrl->i2c_fwinit_data.is_settings_valid == 1)
 		delete_request(&o_ctrl->i2c_fwinit_data);
@@ -2123,6 +2125,29 @@ void cam_ois_shutdown(struct cam_ois_ctrl_t *o_ctrl)
 	power_info->power_down_setting_size = 0;
 	power_info->power_setting_size = 0;
 
+	memset(&o_ctrl->fw_info, 0, sizeof(o_ctrl->fw_info));
+	o_ctrl->ois_fw_flag = 0;
+	o_ctrl->is_ois_calib = 0;
+}
+
+void cam_ois_shutdown(struct cam_ois_ctrl_t *o_ctrl)
+{
+	int rc;
+
+	if (o_ctrl->cam_ois_state >= CAM_OIS_CONFIG) {
+		rc = cam_ois_power_down(o_ctrl);
+		if (rc < 0)
+			CAM_ERR(CAM_OIS, "OIS power down failed: %d", rc);
+	}
+	if (o_ctrl->bridge_intf.device_hdl >= 0) {
+		rc = cam_destroy_device_hdl(o_ctrl->bridge_intf.device_hdl);
+		if (rc < 0)
+			CAM_ERR(CAM_OIS, "OIS handle release failed: %d", rc);
+	}
+	o_ctrl->bridge_intf.device_hdl = -1;
+	o_ctrl->bridge_intf.link_hdl = -1;
+	o_ctrl->bridge_intf.session_hdl = -1;
+	cam_ois_free_session(o_ctrl);
 	o_ctrl->cam_ois_state = CAM_OIS_INIT;
 }
 
@@ -2135,11 +2160,9 @@ void cam_ois_shutdown(struct cam_ois_ctrl_t *o_ctrl)
  */
 int cam_ois_driver_cmd(struct cam_ois_ctrl_t *o_ctrl, void *arg)
 {
-	int                              rc = 0, i = 0;
+	int                              rc = 0;
 	struct cam_ois_query_cap_t       ois_cap = {0};
 	struct cam_control              *cmd = (struct cam_control *)arg;
-	struct cam_ois_soc_private      *soc_private = NULL;
-	struct cam_sensor_power_ctrl_t  *power_info = NULL;
 
 	if (!o_ctrl || !cmd) {
 		CAM_ERR(CAM_OIS, "Invalid arguments");
@@ -2151,10 +2174,6 @@ int cam_ois_driver_cmd(struct cam_ois_ctrl_t *o_ctrl, void *arg)
 			cmd->handle_type);
 		return -EINVAL;
 	}
-
-	soc_private =
-		(struct cam_ois_soc_private *)o_ctrl->soc_info.soc_private;
-	power_info = &soc_private->power_info;
 
 	mutex_lock(&(o_ctrl->ois_mutex));
 	switch (cmd->op_code) {
@@ -2197,88 +2216,27 @@ int cam_ois_driver_cmd(struct cam_ois_ctrl_t *o_ctrl, void *arg)
 		}
 		break;
 	case CAM_RELEASE_DEV:
-		if (o_ctrl->cam_ois_state == CAM_OIS_START) {
+		if (o_ctrl->cam_ois_state == CAM_OIS_START || o_ctrl->bridge_intf.device_hdl == -1) {
 			rc = -EINVAL;
-			CAM_WARN(CAM_OIS,
-				"Cant release ois: in start state");
 			goto release_mutex;
 		}
-
+		if (o_ctrl->bridge_intf.link_hdl != -1) {
+			rc = -EAGAIN;
+			goto release_mutex;
+		}
 		if (o_ctrl->cam_ois_state == CAM_OIS_CONFIG) {
 			rc = cam_ois_power_down(o_ctrl);
-			if (rc < 0) {
-				CAM_ERR(CAM_OIS, "OIS Power down failed");
+			if (rc)
 				goto release_mutex;
-			}
-		}
-
-		if (o_ctrl->bridge_intf.device_hdl == -1) {
-			CAM_ERR(CAM_OIS, "link hdl: %d device hdl: %d",
-				o_ctrl->bridge_intf.device_hdl,
-				o_ctrl->bridge_intf.link_hdl);
-			rc = -EINVAL;
-			goto release_mutex;
+			o_ctrl->cam_ois_state = CAM_OIS_ACQUIRE;
 		}
 		rc = cam_destroy_device_hdl(o_ctrl->bridge_intf.device_hdl);
-		if (rc < 0)
-			CAM_ERR(CAM_OIS, "destroying the device hdl");
+		if (rc)
+			goto release_mutex;
 		o_ctrl->bridge_intf.device_hdl = -1;
-		o_ctrl->bridge_intf.link_hdl = -1;
 		o_ctrl->bridge_intf.session_hdl = -1;
+		cam_ois_free_session(o_ctrl);
 		o_ctrl->cam_ois_state = CAM_OIS_INIT;
-
-		CAM_MEM_FREE(power_info->power_setting);
-		CAM_MEM_FREE(power_info->power_down_setting);
-		power_info->power_setting = NULL;
-		power_info->power_down_setting = NULL;
-		power_info->power_down_setting_size = 0;
-		power_info->power_setting_size = 0;
-
-		if (o_ctrl->i2c_mode_data.is_settings_valid == 1)
-			delete_request(&o_ctrl->i2c_mode_data);
-
-		if (o_ctrl->i2c_calib_data.is_settings_valid == 1)
-			delete_request(&o_ctrl->i2c_calib_data);
-
-		if (o_ctrl->i2c_init_data.is_settings_valid == 1)
-			delete_request(&o_ctrl->i2c_init_data);
-
-		if (o_ctrl->i2c_fwinit_data.is_settings_valid == 1)
-			delete_request(&o_ctrl->i2c_fwinit_data);
-
-		for (i = 0; i < o_ctrl->fw_info.fw_count; i++) {
-			if (o_ctrl->i2c_fw_init_data &&
-				(o_ctrl->i2c_fw_init_data[i].is_settings_valid == 1)) {
-				rc = delete_request(&o_ctrl->i2c_fw_init_data[i]);
-				if (rc < 0) {
-					CAM_WARN(CAM_OIS,
-						"Fail deleting i2c_fw_init_data: rc: %d", rc);
-					rc = 0;
-				}
-			}
-			if (o_ctrl->i2c_fw_finalize_data &&
-				(o_ctrl->i2c_fw_finalize_data[i].is_settings_valid == 1)) {
-				rc = delete_request(&o_ctrl->i2c_fw_finalize_data[i]);
-				if (rc < 0) {
-					CAM_WARN(CAM_OIS,
-						"Fail deleting i2c_fw_finalize_data: rc: %d", rc);
-					rc = 0;
-				}
-			}
-		}
-
-		if (o_ctrl->i2c_fw_init_data){
-			CAM_MEM_FREE(o_ctrl->i2c_fw_init_data);
-			o_ctrl->i2c_fw_init_data = NULL;
-		}
-		if (o_ctrl->i2c_fw_finalize_data){
-			CAM_MEM_FREE(o_ctrl->i2c_fw_finalize_data);
-			o_ctrl->i2c_fw_finalize_data = NULL;
-		}
-		if (o_ctrl->fw_info.fw_param) {
-			CAM_MEM_FREE(o_ctrl->fw_info.fw_param);
-			o_ctrl->fw_info.fw_param = NULL;
-		}
 		break;
 	case CAM_STOP_DEV:
 		if (o_ctrl->cam_ois_state != CAM_OIS_START) {

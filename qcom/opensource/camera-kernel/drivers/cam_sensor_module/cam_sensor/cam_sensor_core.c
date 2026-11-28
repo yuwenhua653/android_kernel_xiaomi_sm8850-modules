@@ -2060,6 +2060,7 @@ int cam_sensor_power_up(struct cam_sensor_ctrl_t *s_ctrl)
 
 	if (s_ctrl->hw_no_ops)
 		return rc;
+	CAM_NEZHA_CCI_POWER_GUARD(&s_ctrl->io_master_info);
 
 	power_info = &s_ctrl->sensordata->power_info;
 	slave_info = &(s_ctrl->sensordata->slave_info);
@@ -2143,6 +2144,7 @@ int cam_sensor_power_down(struct cam_sensor_ctrl_t *s_ctrl)
 
 	if (s_ctrl->hw_no_ops)
 		return rc;
+	CAM_NEZHA_CCI_POWER_GUARD(&s_ctrl->io_master_info);
 
 	/*
 	 * Even if any section of powerdown fails, we still need to move on

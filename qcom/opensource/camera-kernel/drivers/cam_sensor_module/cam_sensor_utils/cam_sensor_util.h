@@ -21,6 +21,18 @@
 #include "cam_sensor_io.h"
 #include "cam_csiphy_core.h"
 
+#if defined(CONFIG_TARGET_PRODUCT_NEZHA) && CONFIG_TARGET_PRODUCT_NEZHA
+#include <linux/cleanup.h>
+void cam_nezha_init_cci_power_locks(void);
+struct mutex *cam_nezha_lock_cci_power(struct camera_io_master *io);
+
+DEFINE_CLASS(nezha_cci_power, struct mutex *, if (_T) mutex_unlock(_T),
+	     cam_nezha_lock_cci_power(io), struct camera_io_master *io);
+#define CAM_NEZHA_CCI_POWER_GUARD(io) CLASS(nezha_cci_power, cci_power_lock)(io)
+#else
+#define CAM_NEZHA_CCI_POWER_GUARD(io) do { } while (0)
+#endif
+
 #define INVALID_VREG 100
 #define RES_MGR_GPIO_NEED_HOLD   1
 #define RES_MGR_GPIO_CAN_FREE    2

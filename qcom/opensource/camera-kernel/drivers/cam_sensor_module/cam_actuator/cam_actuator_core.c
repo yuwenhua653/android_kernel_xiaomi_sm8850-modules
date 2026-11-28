@@ -59,6 +59,7 @@ static int32_t cam_actuator_power_up(struct cam_actuator_ctrl_t *a_ctrl)
 	struct cam_actuator_soc_private        *soc_private;
 	struct cam_sensor_power_ctrl_t         *power_info;
 	struct completion                      *i3c_probe_completion = NULL;
+	CAM_NEZHA_CCI_POWER_GUARD(&a_ctrl->io_master_info);
 
 	soc_private =
 		(struct cam_actuator_soc_private *)a_ctrl->soc_info.soc_private;
@@ -130,6 +131,7 @@ static int32_t cam_actuator_power_down(struct cam_actuator_ctrl_t *a_ctrl)
 	struct cam_sensor_power_ctrl_t *power_info;
 	struct cam_hw_soc_info *soc_info = &a_ctrl->soc_info;
 	struct cam_actuator_soc_private  *soc_private;
+	CAM_NEZHA_CCI_POWER_GUARD(&a_ctrl->io_master_info);
 
 	if (!a_ctrl) {
 		CAM_ERR(CAM_ACTUATOR, "failed: a_ctrl %pK", a_ctrl);
@@ -205,10 +207,11 @@ static int32_t cam_actuator_i2c_modes_util(
 			i2c_list->i2c_settings.addr_type,
 			i2c_list->i2c_settings.data_type,
 			i2c_list->i2c_settings.reg_setting[i].delay);
-			if (rc < 0) {
+			if (rc < 0 || (IS_ENABLED(CONFIG_TARGET_PRODUCT_NEZHA) &&
+				       rc == I2C_COMPARE_MISMATCH)) {
 				CAM_ERR(CAM_ACTUATOR,
 					"i2c poll apply setting Fail: %d", rc);
-				return rc;
+				return rc == I2C_COMPARE_MISMATCH ? -EIO : rc;
 			}
 		}
 	}
@@ -459,7 +462,8 @@ static int32_t cam_actuator_park_lens_cb(void *priv, void *data)
 		ret = rc;
 	if (!rc) {
 		powered_down = true;
-		a_ctrl->cam_act_state = CAM_ACTUATOR_INIT;
+		a_ctrl->cam_act_state = a_ctrl->bridge_intf.device_hdl >= 0 ?
+			CAM_ACTUATOR_ACQUIRE : CAM_ACTUATOR_INIT;
 	}
 cleanup:
 	rc = delete_request(&a_ctrl->i2c_data.config_settings);
@@ -475,8 +479,8 @@ cleanup:
 		power_info->power_down_setting_size = 0;
 	}
 	WRITE_ONCE(a_ctrl->is_deferred_park_lens, false);
-	mutex_unlock(&a_ctrl->actuator_park_mutex);
 	complete_all(&a_ctrl->park_lens_complete);
+	mutex_unlock(&a_ctrl->actuator_park_mutex);
 	return ret;
 }
 
@@ -625,6 +629,35 @@ free:
  * Complete the sequence and power-down under the caller's device mutex. This
  * deliberately keeps ownership until completion instead of retaining a raw
  * device pointer in an unjoined private parking thread. */
+/* The Nezha actuator allows 20 moves and settles for 10 ms by default. */
+static int cam_actuator_nezha_park_steps(struct cam_actuator_ctrl_t *ctrl,
+					struct i2c_settings_array *settings)
+{
+	struct i2c_settings_list *step;
+	unsigned int count = 0;
+	int ret;
+
+	if (list_empty(&settings->list_head))
+		return -EINVAL;
+	list_for_each_entry(step, &settings->list_head, list) {
+		unsigned int delay = step->i2c_settings.delay;
+
+		if (++count > 20)
+			return -E2BIG;
+		if (step->op_code != CAM_SENSOR_I2C_WRITE_RANDOM &&
+		    step->op_code != CAM_SENSOR_I2C_WRITE_SEQ &&
+		    step->op_code != CAM_SENSOR_I2C_WRITE_BURST &&
+		    step->op_code != CAM_SENSOR_I2C_POLL)
+			return -EOPNOTSUPP;
+		step->i2c_settings.delay = 0;
+		ret = cam_actuator_i2c_modes_util(&ctrl->io_master_info, step);
+		if (ret)
+			return ret == I2C_COMPARE_MISMATCH ? -EIO : ret;
+		msleep(delay > 10 && delay < 100 ? delay : 10);
+	}
+	return 0;
+}
+
 static int cam_actuator_nezha_park(struct cam_actuator_ctrl_t *ctrl,
 				   struct cam_cmd_buf_desc *desc)
 {
@@ -645,7 +678,7 @@ static int cam_actuator_nezha_park(struct cam_actuator_ctrl_t *ctrl,
 					    desc, 1, NULL);
 	if (ret)
 		goto cleanup;
-	ret = cam_actuator_apply_settings(ctrl, &settings);
+	ret = cam_actuator_nezha_park_steps(ctrl, &settings);
 	/* A failed movement still attempts power-down, preserving the first error. */
 	rc = cam_actuator_power_down(ctrl);
 	if (!rc)
@@ -1150,9 +1183,6 @@ void cam_actuator_shutdown(struct cam_actuator_ctrl_t *a_ctrl)
 
 	a_ctrl->is_deferred_park_lens = false;
 
-	if (a_ctrl->cam_act_state == CAM_ACTUATOR_INIT)
-		goto out;
-
 	if (a_ctrl->cam_act_state >= CAM_ACTUATOR_CONFIG) {
 		rc = cam_actuator_power_down(a_ctrl);
 		if (rc < 0)
@@ -1160,7 +1190,7 @@ void cam_actuator_shutdown(struct cam_actuator_ctrl_t *a_ctrl)
 		a_ctrl->cam_act_state = CAM_ACTUATOR_ACQUIRE;
 	}
 
-	if (a_ctrl->cam_act_state >= CAM_ACTUATOR_ACQUIRE) {
+	if (a_ctrl->bridge_intf.device_hdl >= 0) {
 		rc = cam_destroy_device_hdl(a_ctrl->bridge_intf.device_hdl);
 		if (rc < 0)
 			CAM_ERR(CAM_ACTUATOR, "destroying  dhdl failed");
@@ -1178,7 +1208,6 @@ void cam_actuator_shutdown(struct cam_actuator_ctrl_t *a_ctrl)
 	a_ctrl->last_flush_req = 0;
 
 	a_ctrl->cam_act_state = CAM_ACTUATOR_INIT;
-out:
 	mutex_unlock(&a_ctrl->actuator_park_mutex);
 }
 
@@ -1214,10 +1243,7 @@ int32_t cam_actuator_driver_cmd(struct cam_actuator_ctrl_t *a_ctrl,
 		struct cam_sensor_acquire_dev actuator_acq_dev;
 		struct cam_create_dev_hdl bridge_params;
 
-		if ((a_ctrl->cam_act_state != CAM_ACTUATOR_INIT) &&
-			a_ctrl->is_deferred_park_lens) {
-			CAM_DBG(CAM_ACTUATOR, "Wait for park done in state: %d",
-				a_ctrl->cam_act_state);
+		if (READ_ONCE(a_ctrl->is_deferred_park_lens)) {
 			rc = cam_actuator_wait_for_park_done(a_ctrl);
 			if (rc)
 				goto release_mutex;
@@ -1231,7 +1257,8 @@ int32_t cam_actuator_driver_cmd(struct cam_actuator_ctrl_t *a_ctrl,
 		rc = copy_from_user(&actuator_acq_dev,
 			u64_to_user_ptr(cmd->handle),
 			sizeof(actuator_acq_dev));
-		if (rc < 0) {
+		if (rc) {
+			rc = -EFAULT;
 			CAM_ERR(CAM_ACTUATOR, "Failed Copying from user\n");
 			goto release_mutex;
 		}
@@ -1259,6 +1286,10 @@ int32_t cam_actuator_driver_cmd(struct cam_actuator_ctrl_t *a_ctrl,
 		if (copy_to_user(u64_to_user_ptr(cmd->handle),
 			&actuator_acq_dev,
 			sizeof(struct cam_sensor_acquire_dev))) {
+			if (!cam_destroy_device_hdl(a_ctrl->bridge_intf.device_hdl)) {
+				a_ctrl->bridge_intf.device_hdl = -1;
+				a_ctrl->bridge_intf.session_hdl = -1;
+			}
 			CAM_ERR(CAM_ACTUATOR, "Failed Copy to User");
 			rc = -EFAULT;
 			goto release_mutex;
@@ -1284,42 +1315,38 @@ int32_t cam_actuator_driver_cmd(struct cam_actuator_ctrl_t *a_ctrl,
 			goto release_mutex;
 		}
 
-		if (a_ctrl->cam_act_state == CAM_ACTUATOR_CONFIG) {
-			if (a_ctrl->is_deferred_park_lens) {
-				CAM_DBG(CAM_ACTUATOR, "Actuator park in deferred task");
-			} else {
-				rc = cam_actuator_power_down(a_ctrl);
-				if (rc < 0) {
-					CAM_ERR(CAM_ACTUATOR,
-						"Actuator Power Down Failed");
-					goto release_mutex;
-				}
-
-				a_ctrl->cam_act_state = CAM_ACTUATOR_INIT;
-				CAM_MEM_FREE(power_info->power_setting);
-				CAM_MEM_FREE(power_info->power_down_setting);
-				power_info->power_setting = NULL;
-				power_info->power_down_setting = NULL;
-				power_info->power_down_setting_size = 0;
-				power_info->power_setting_size = 0;
-			}
-		}
-
 		if (a_ctrl->bridge_intf.link_hdl != -1) {
-			CAM_ERR(CAM_ACTUATOR,
-				"Device [%d] still active on link 0x%x",
-				a_ctrl->cam_act_state,
-				a_ctrl->bridge_intf.link_hdl);
 			rc = -EAGAIN;
 			goto release_mutex;
 		}
-
-		rc = cam_destroy_device_hdl(a_ctrl->bridge_intf.device_hdl);
-		if (rc < 0)
-			CAM_ERR(CAM_ACTUATOR, "destroying the device hdl");
-		a_ctrl->bridge_intf.device_hdl = -1;
-		a_ctrl->bridge_intf.link_hdl = -1;
-		a_ctrl->bridge_intf.session_hdl = -1;
+		if (READ_ONCE(a_ctrl->is_deferred_park_lens)) {
+			rc = cam_actuator_wait_for_park_done(a_ctrl);
+			if (rc)
+				goto release_mutex;
+		}
+		/* The park worker never takes actuator_mutex. */
+		mutex_lock(&a_ctrl->actuator_park_mutex);
+		if (a_ctrl->cam_act_state == CAM_ACTUATOR_CONFIG) {
+			rc = cam_actuator_power_down(a_ctrl);
+			if (!rc)
+				a_ctrl->cam_act_state = CAM_ACTUATOR_ACQUIRE;
+		}
+		if (!rc)
+			rc = cam_destroy_device_hdl(a_ctrl->bridge_intf.device_hdl);
+		if (!rc) {
+			CAM_MEM_FREE(power_info->power_setting);
+			CAM_MEM_FREE(power_info->power_down_setting);
+			power_info->power_setting = NULL;
+			power_info->power_down_setting = NULL;
+			power_info->power_setting_size = 0;
+			power_info->power_down_setting_size = 0;
+			a_ctrl->bridge_intf.device_hdl = -1;
+			a_ctrl->bridge_intf.session_hdl = -1;
+			a_ctrl->cam_act_state = CAM_ACTUATOR_INIT;
+		}
+		mutex_unlock(&a_ctrl->actuator_park_mutex);
+		if (rc)
+			goto release_mutex;
 		a_ctrl->last_flush_req = 0;
 	}
 		break;

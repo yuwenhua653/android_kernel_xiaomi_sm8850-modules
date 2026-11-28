@@ -200,3 +200,23 @@ prints four pre-existing qseecom header deprecation notices. Local validation
 uses LLVM 19.1.7 with CFI/MODVERSIONS; Rust, BTF and automatic module signing
 are disabled only in the output configuration. This is not signed production
 DLKM/boot-image qualification or hardware acceptance.
+
+## OS4.0.7 session release and shared CCI power
+
+Nezha sensor, zoom, OIS and actuator power transitions now use a lock for their
+physical CCI device/master pair. The four-device, three-master table follows the
+published Nezha camera source. Power changes on different masters may proceed
+concurrently. The HAL session mutex still owns each device's command sequence.
+
+A short userspace copy now fails acquisition. A failed handle copy-out unwinds
+the handle. Release checks for a live CRM link before powering down, retains a
+failed power-down or handle destruction for retry, and frees actuator power
+settings after parking or an acquire-only session. OIS releases its parsed
+firmware/version data before the next acquire. Nezha actuator park handles up to
+20 moves and the OEM settling delays. OIS park observes the OEM 100-tick budget.
+A failed poll now terminates the movement and propagates the error.
+
+Eight camera host tests exercise these entry points, staged failures and
+same/different-master locking. ARM64 Kbuild linked camera.ko against the kernel
+and its external dependencies with strict modpost. Mechanical motion, HAL timing,
+camera switching and flash still require a phone running the matching firmware.
